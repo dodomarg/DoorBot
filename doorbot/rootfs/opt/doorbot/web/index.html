@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DoorBot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="toast" class="toast" hidden></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">&#128274;</span>
+    <div>
+      <h1>DoorBot</h1>
+      <p id="subtitle">Loading&hellip;</p>
+    </div>
+  </div>
+  <div class="statechip" id="statechip">&mdash;</div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="lock" role="tab">Lock</button>
+  <button class="tab" data-tab="calibrate" role="tab">Calibration</button>
+  <button class="tab" data-tab="codes" role="tab">PIN codes</button>
+  <button class="tab" data-tab="keypad" role="tab">Keypad</button>
+  <button class="tab" data-tab="log" role="tab">Log</button>
+</nav>
+
+<main>
+  <!-- ------------------------------------------------------------- LOCK -->
+  <section class="panel active" id="tab-lock">
+    <div class="card hero">
+      <div class="hero-state">
+        <div class="dial">
+          <svg viewBox="0 0 120 120" class="dialsvg">
+            <circle cx="60" cy="60" r="52" class="dial-track"/>
+            <circle cx="60" cy="60" r="52" class="dial-progress" id="dialProgress"/>
+            <line x1="60" y1="60" x2="60" y2="16" class="dial-needle" id="dialNeedle"/>
+            <circle cx="60" cy="60" r="6" class="dial-hub"/>
+          </svg>
+          <div class="dial-readout">
+            <strong id="posValue">&mdash;</strong>
+            <span id="degValue">&nbsp;</span>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <button class="btn big primary" id="btnLock">Lock</button>
+          <button class="btn big" id="btnUnlock">Unlock</button>
+          <button class="btn ghost" id="btnStop">Stop</button>
+        </div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>Load</span><strong id="mLoad">&mdash;</strong></div>
+        <div class="metric"><span>Voltage</span><strong id="mVolt">&mdash;</strong></div>
+        <div class="metric"><span>Temp</span><strong id="mTemp">&mdash;</strong></div>
+        <div class="metric"><span>Torque</span><strong id="mTorque">&mdash;</strong></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Try a PIN</h2>
+      <p class="muted">Simulates a code being entered. Use this to test everything without a keypad.</p>
+      <div class="keypad" id="virtualKeypad">
+        <input id="pinDisplay" class="pindisplay" readonly placeholder="Enter PIN">
+        <div class="keys">
+          <button class="key" data-k="1">1</button><button class="key" data-k="2">2</button><button class="key" data-k="3">3</button>
+          <button class="key" data-k="4">4</button><button class="key" data-k="5">5</button><button class="key" data-k="6">6</button>
+          <button class="key" data-k="7">7</button><button class="key" data-k="8">8</button><button class="key" data-k="9">9</button>
+          <button class="key subtle" data-k="clear">&#9003;</button><button class="key" data-k="0">0</button>
+          <button class="key go" data-k="enter">&#10003;</button>
+        </div>
+      </div>
+      <div id="pinResult" class="result" hidden></div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------ CALIBRATION -->
+  <section class="panel" id="tab-calibrate">
+    <div class="card">
+      <h2>Calibration wizard</h2>
+      <p class="muted">
+        Teach DoorBot where your deadbolt is locked and unlocked &mdash; the same
+        idea as calibrating a SwitchBot Lock, but you set the exact servo positions.
+      </p>
+
+      <ol class="steps">
+        <li>
+          <h3>1. Release the servo</h3>
+          <p>Turn torque off so you can move the thumbturn freely by hand.</p>
+          <div class="row">
+            <button class="btn" id="btnTorqueOff">Release servo</button>
+            <button class="btn" id="btnTorqueOn">Hold position</button>
+          </div>
+        </li>
+        <li>
+          <h3>2. Find the locked position</h3>
+          <p>Jog or hand-turn until the bolt is fully thrown, then capture it.</p>
+          <div class="row jog">
+            <button class="btn" data-jog="-100">&laquo; 100</button>
+            <button class="btn" data-jog="-25">&laquo; 25</button>
+            <button class="btn" data-jog="-5">&laquo; 5</button>
+            <button class="btn" data-jog="5">5 &raquo;</button>
+            <button class="btn" data-jog="25">25 &raquo;</button>
+            <button class="btn" data-jog="100">100 &raquo;</button>
+          </div>
+          <div class="row">
+            <button class="btn primary" data-capture="locked">Set as LOCKED</button>
+            <span class="pill" id="pillLocked">&mdash;</span>
+          </div>
+        </li>
+        <li>
+          <h3>3. Find the unlocked position</h3>
+          <p>Now move to where the bolt is fully retracted and capture that.</p>
+          <div class="row">
+            <button class="btn primary" data-capture="unlocked">Set as UNLOCKED</button>
+            <span class="pill" id="pillUnlocked">&mdash;</span>
+          </div>
+        </li>
+        <li>
+          <h3>4. Test it</h3>
+          <div class="row">
+            <button class="btn" id="btnTestLock">Test lock</button>
+            <button class="btn" id="btnTestUnlock">Test unlock</button>
+            <button class="btn danger ghost" id="btnResetCal">Reset calibration</button>
+          </div>
+        </li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>Motion &amp; safety</h2>
+      <form id="calForm" class="grid">
+        <label>Locked position <small>0&ndash;4095</small>
+          <input type="number" name="locked_position" min="0" max="4095" required></label>
+        <label>Unlocked position <small>0&ndash;4095</small>
+          <input type="number" name="unlocked_position" min="0" max="4095" required></label>
+        <label>Overshoot <small>extra push past the target</small>
+          <input type="number" name="overshoot" min="0" max="500"></label>
+        <label>Hold at overshoot <small>ms</small>
+          <input type="number" name="hold_ms" min="0" max="5000" step="50"></label>
+        <label>Speed <small>steps/s</small>
+          <input type="number" name="speed" min="50" max="4000" step="50"></label>
+        <label>Acceleration <small>0&ndash;255</small>
+          <input type="number" name="acceleration" min="0" max="255"></label>
+        <label>Torque limit <small>0&ndash;1000</small>
+          <input type="number" name="torque_limit" min="0" max="1000" step="10"></label>
+        <label>Stall / jam threshold <small>present load</small>
+          <input type="number" name="stall_load" min="0" max="1000" step="10"></label>
+        <label>Servo ID
+          <input type="number" name="servo_id" min="0" max="253"></label>
+        <label>Baud rate
+          <select name="baud">
+            <option value="1000000">1,000,000 (default)</option>
+            <option value="500000">500,000</option>
+            <option value="250000">250,000</option>
+            <option value="115200">115,200</option>
+          </select></label>
+        <label>Auto-lock after <small>seconds, 0 = off</small>
+          <input type="number" name="auto_lock_seconds" min="0" max="3600"></label>
+        <label class="check"><input type="checkbox" name="invert"> Invert direction</label>
+        <div class="formactions">
+          <button type="submit" class="btn primary">Save settings</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card" id="devCard">
+      <h2>Simulator</h2>
+      <p class="muted">Only available with the mock backend. Handy for checking jam handling.</p>
+      <label class="check"><input type="checkbox" id="jamToggle"> Make the next movement jam</label>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------ CODES -->
+  <section class="panel" id="tab-codes">
+    <div class="card">
+      <div class="cardhead">
+        <h2>PIN codes</h2>
+        <button class="btn primary" id="btnNewCode">Add code</button>
+      </div>
+      <p class="muted">
+        PINs are stored hashed (PBKDF2-SHA256) &mdash; DoorBot can check a code but
+        can never show it back to you.
+      </p>
+      <div id="codeList" class="codelist"></div>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------- KEYPAD -->
+  <section class="panel" id="tab-keypad">
+    <div class="card">
+      <h2>SwitchBot Keypad</h2>
+      <div class="notice">
+        <strong>How this works.</strong> The SwitchBot Keypad checks the PIN itself and
+        then broadcasts an unencrypted BLE advertisement containing a counter
+        (<code>attempt_state</code>). The counter goes up by <strong>1</strong> when a
+        code is rejected and by <strong>2</strong> when it is accepted. DoorBot&rsquo;s ESP32
+        watches for that and can open the lock. It cannot tell you <em>which</em> PIN was
+        used, and the advert is replayable &mdash; so treat it as convenience, not
+        as your only security layer.
+      </div>
+      <form id="keypadForm" class="grid">
+        <label class="check"><input type="checkbox" name="enabled"> Act on keypad events</label>
+        <label>Keypad BLE address
+          <input type="text" name="address" placeholder="AA:BB:CC:DD:EE:FF"></label>
+        <label>On an accepted code
+          <select name="action">
+            <option value="unlock">Unlock</option>
+            <option value="toggle">Toggle</option>
+            <option value="notify">Only log / notify</option>
+          </select></label>
+        <label>Minimum seconds between actions
+          <input type="number" name="min_interval_seconds" min="0" max="120"></label>
+        <label class="check"><input type="checkbox" name="require_local_pin">
+          Require a DoorBot PIN as well (keypad alone will not open)</label>
+        <div class="formactions"><button type="submit" class="btn primary">Save</button></div>
+      </form>
+      <div class="metrics">
+        <div class="metric"><span>Battery</span><strong id="kBatt">&mdash;</strong></div>
+        <div class="metric"><span>attempt_state</span><strong id="kAttempt">&mdash;</strong></div>
+        <div class="metric"><span>Last result</span><strong id="kResult">&mdash;</strong></div>
+        <div class="metric"><span>Last seen</span><strong id="kSeen">&mdash;</strong></div>
+      </div>
+      <h3>Simulate</h3>
+      <p class="muted">Send fake advertisements to test the pipeline without the keypad.</p>
+      <div class="row">
+        <button class="btn" id="btnSimReject">Simulate rejected (+1)</button>
+        <button class="btn primary" id="btnSimAccept">Simulate accepted (+2)</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- -------------------------------------------------------------- LOG -->
+  <section class="panel" id="tab-log">
+    <div class="card">
+      <div class="cardhead">
+        <h2>Event log</h2>
+        <button class="btn ghost" id="btnRefreshLog">Refresh</button>
+      </div>
+      <div id="logList" class="loglist"></div>
+    </div>
+  </section>
+</main>
+
+<!-- --------------------------------------------------------------- MODAL -->
+<div class="modal" id="codeModal" hidden>
+  <div class="modalbox">
+    <h2 id="codeModalTitle">Add code</h2>
+    <form id="codeForm" class="grid">
+      <input type="hidden" name="id">
+      <label>Name
+        <input type="text" name="name" required placeholder="e.g. Cleaner"></label>
+      <label>PIN <small>4&ndash;12 digits</small>
+        <span class="inputrow">
+          <input type="text" name="code" inputmode="numeric" pattern="[0-9]*" placeholder="Leave blank to keep">
+          <button type="button" class="btn small" id="btnSuggest">Suggest</button>
+        </span></label>
+      <label>Type
+        <select name="kind">
+          <option value="permanent">Permanent</option>
+          <option value="temporary">Time limited</option>
+          <option value="one_time">One time</option>
+          <option value="recurring">Recurring schedule</option>
+          <option value="duress">Duress (opens + raises alarm)</option>
+        </select></label>
+      <label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
+
+      <fieldset class="span" data-when="temporary recurring one_time duress">
+        <legend>Validity window</legend>
+        <div class="grid2">
+          <label>Valid from <input type="datetime-local" name="valid_from"></label>
+          <label>Valid until <input type="datetime-local" name="valid_to"></label>
+        </div>
+      </fieldset>
+
+      <fieldset class="span" data-when="recurring">
+        <legend>Recurring schedule</legend>
+        <div class="days" id="daysPicker"></div>
+        <div class="grid2">
+          <label>From <input type="time" name="start_time" value="00:00"></label>
+          <label>Until <input type="time" name="end_time" value="23:59"></label>
+        </div>
+      </fieldset>
+
+      <label>Max uses <small>blank = unlimited</small>
+        <input type="number" name="max_uses" min="1" max="9999"></label>
+      <label>SwitchBot keypad slot <small>optional, for your own records</small>
+        <input type="number" name="keypad_slot" min="1" max="100"></label>
+      <label class="span">Notes
+        <textarea name="notes" rows="2"></textarea></label>
+
+      <div class="formactions span">
+        <button type="button" class="btn ghost" id="btnCancelCode">Cancel</button>
+        <button type="submit" class="btn primary">Save code</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

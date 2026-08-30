@@ -1,0 +1,19 @@
+#!/usr/bin/with-contenv bashio
+# shellcheck shell=bash
+# Entry point for the DoorBot add-on.
+
+set -euo pipefail
+
+export DOORBOT_DATA="${DOORBOT_DATA:-/data}"
+export DOORBOT_PORT="${DOORBOT_PORT:-8099}"
+
+if bashio::config.has_value 'log_level'; then
+    export DOORBOT_LOG_LEVEL="$(bashio::config 'log_level')"
+fi
+
+# The Supervisor injects SUPERVISOR_TOKEN; the app uses it to reach the Core API.
+export DOORBOT_HASS_URL="http://supervisor/core"
+
+bashio::log.info "Starting DoorBot on port ${DOORBOT_PORT}..."
+cd /opt/doorbot
+exec python3 -m app

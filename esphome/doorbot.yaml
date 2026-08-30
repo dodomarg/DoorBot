@@ -1,0 +1,398 @@
+# ---------------------------------------------------------------------------
+# DoorBot - Seeed XIAO ESP32S3 + Seeed Bus Servo Driver Board + Feetech STS3215
+#
+# Wiring (the XIAO plugs straight into the driver board's headers):
+#   XIAO D6 / GPIO43 -> servo bus TX
+#   XIAO D7 / GPIO44 -> servo bus RX
+#   Driver board DC IN: 5-12 V matching your servo (STS3215 12 V variant -> 12 V)
+#   The XIAO is powered separately over USB-C.
+#
+# The servo bus runs at 1,000,000 baud, which is the STS3215 factory default.
+# ---------------------------------------------------------------------------
+
+substitutions:
+  device_name: doorbot
+  friendly_name: DoorBot
+  # Set this once you know your keypad's BLE address, then uncomment the
+  # esp32_ble_tracker triggers below.
+  keypad_mac: "AA:BB:CC:DD:EE:FF"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(bolt)->set_torque_limit((uint16_t) id(torque_limit).state);
+
+esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [sts3215]
+  # When running from GitHub instead, swap the block above for:
+  # - source: github://dodomarg/DoorBot@main
+  #   components: [sts3215]
+
+logger:
+  baud_rate: 0  # UART0 is used for the servo bus; log over USB CDC / OTA instead
+
+api:
+  encryption:
+    key: !secret doorbot_api_key
+  services:
+    - service: move_to
+      variables:
+        position: int
+        speed: int
+      then:
+        - lambda: 'id(bolt)->move_to(position, speed);'
+    - service: set_torque
+      variables:
+        enabled: bool
+      then:
+        - lambda: 'id(bolt)->set_torque(enabled);'
+    - service: capture_position
+      variables:
+        which: string
+      then:
+        - lambda: |-
+            const int pos = id(bolt)->position();
+            if (pos < 0) return;
+            if (which == "locked") {
+              id(locked_position).publish_state(pos);
+            } else if (which == "unlocked") {
+              id(unlocked_position).publish_state(pos);
+            }
+    - service: home_to_stall
+      variables:
+        direction: int
+        load_threshold: int
+      then:
+        - lambda: 'id(bolt)->home_to_stall(direction, load_threshold, 1200, 300);'
+
+ota:
+  - platform: esphome
+    password: !secret doorbot_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Setup"
+    password: !secret doorbot_ap_password
+
+captive_portal:
+
+# ---------------------------------------------------------------- servo bus
+uart:
+  id: servo_bus
+  tx_pin: GPIO43   # XIAO D6
+  rx_pin: GPIO44   # XIAO D7
+  baud_rate: 1000000
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+
+sts3215:
+  id: bolt
+  uart_id: servo_bus
+  servo_id: 1
+  update_interval: 1s
+  position:
+    name: "Position"
+    id: servo_position
+  load:
+    name: "Load"
+    id: servo_load
+  voltage:
+    name: "Servo voltage"
+  temperature:
+    name: "Servo temperature"
+  moving:
+    name: "Moving"
+    id: servo_moving
+  online:
+    name: "Servo online"
+    id: servo_online
+
+# ------------------------------------------------------------- calibration
+# These are plain template numbers with restore_value, so the calibration
+# survives reboots and the lock keeps working even if the add-on is stopped.
+number:
+  - platform: template
+    name: "Locked position"
+    id: locked_position
+    optimistic: true
+    restore_value: true
+    initial_value: 2048
+    min_value: 0
+    max_value: 4095
+    step: 1
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Unlocked position"
+    id: unlocked_position
+    optimistic: true
+    restore_value: true
+    initial_value: 1024
+    min_value: 0
+    max_value: 4095
+    step: 1
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Target position"
+    id: target_position
+    min_value: 0
+    max_value: 4095
+    step: 1
+    mode: slider
+    optimistic: true
+    set_action:
+      - lambda: 'id(bolt)->move_to((int) x);'
+
+  - platform: template
+    name: "Speed"
+    id: move_speed
+    optimistic: true
+    restore_value: true
+    initial_value: 800
+    min_value: 50
+    max_value: 4000
+    step: 50
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Overshoot"
+    id: overshoot
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: 0
+    max_value: 500
+    step: 5
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Torque limit"
+    id: torque_limit
+    optimistic: true
+    restore_value: true
+    initial_value: 700
+    min_value: 0
+    max_value: 1000
+    step: 10
+    mode: box
+    entity_category: config
+    set_action:
+      - lambda: 'id(bolt)->set_torque_limit((uint16_t) x);'
+
+  - platform: template
+    name: "Jam load threshold"
+    id: stall_load
+    optimistic: true
+    restore_value: true
+    initial_value: 850
+    min_value: 100
+    max_value: 1000
+    step: 10
+    mode: box
+    entity_category: config
+
+switch:
+  - platform: template
+    name: "Servo torque"
+    id: servo_torque
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    entity_category: config
+    turn_on_action:
+      - lambda: 'id(bolt)->set_torque(true);'
+    turn_off_action:
+      - lambda: 'id(bolt)->set_torque(false);'
+
+button:
+  - platform: template
+    name: "Capture locked position"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          if (id(bolt)->position() >= 0)
+            id(locked_position).publish_state(id(bolt)->position());
+
+  - platform: template
+    name: "Capture unlocked position"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          if (id(bolt)->position() >= 0)
+            id(unlocked_position).publish_state(id(bolt)->position());
+
+  - platform: restart
+    name: "Restart"
+
+# ------------------------------------------------------------------- lock
+lock:
+  - platform: template
+    name: "Lock"
+    id: door_lock
+    optimistic: false
+    lambda: |-
+      if (!id(servo_online).state || id(bolt)->position() < 0)
+        return {};
+      const int pos = id(bolt)->position();
+      const int locked = (int) id(locked_position).state;
+      const int unlocked = (int) id(unlocked_position).state;
+      const int travel = abs(locked - unlocked);
+      const int tolerance = std::max(25, travel * 15 / 100);
+      if (abs(pos - locked) <= tolerance)
+        return LOCK_STATE_LOCKED;
+      if (abs(pos - unlocked) <= tolerance)
+        return LOCK_STATE_UNLOCKED;
+      return {};
+    lock_action:
+      - script.execute:
+          id: travel_to
+          target: !lambda 'return (int) id(locked_position).state;'
+          away_from: !lambda 'return (int) id(unlocked_position).state;'
+      - script.wait: travel_to
+    unlock_action:
+      - script.execute:
+          id: travel_to
+          target: !lambda 'return (int) id(unlocked_position).state;'
+          away_from: !lambda 'return (int) id(locked_position).state;'
+      - script.wait: travel_to
+    open_action:
+      - lock.unlock: door_lock
+
+script:
+  # Drives the bolt to `target`, optionally pushing a little past it first so a
+  # stiff euro cylinder is fully thrown, then settling exactly on target.
+  - id: travel_to
+    mode: restart
+    parameters:
+      target: int
+      away_from: int
+    then:
+      - lambda: |-
+          const int push = (int) id(overshoot).state;
+          const int speed = (int) id(move_speed).state;
+          if (push > 0) {
+            const int dir = target >= away_from ? 1 : -1;
+            id(bolt)->move_to(target + dir * push, speed);
+          } else {
+            id(bolt)->move_to(target, speed);
+          }
+      - delay: 1200ms
+      - lambda: 'id(bolt)->move_to(target, (int) id(move_speed).state);'
+      - delay: 600ms
+      - if:
+          condition:
+            lambda: 'return abs(id(bolt)->load()) >= (int) id(stall_load).state;'
+          then:
+            - logger.log:
+                level: WARN
+                format: "DoorBot may be jammed: load %d"
+                args: ['id(bolt)->load()']
+            - homeassistant.event:
+                event: esphome.doorbot_jammed
+
+  - id: keypad_unlock
+    mode: single
+    then:
+      - lock.unlock: door_lock
+      - homeassistant.event:
+          event: esphome.doorbot_keypad
+          data:
+            result: accepted
+
+# -------------------------------------------------- SwitchBot Keypad (BLE)
+#
+# The SwitchBot Keypad validates the PIN itself and then broadcasts an
+# UNENCRYPTED advertisement:
+#   service data 0xFD3D : [0] model char 'y', [2] & 0x7F = battery %
+#   manufacturer 0x0969 : [6] = attempt_state, an 8-bit wrapping counter
+# The counter advances by 1 for a rejected PIN and by 2 for an accepted one.
+#
+# Because the advert is unencrypted it is replayable and does not identify
+# which PIN was used. Keep this as a convenience path only.
+#
+# Set `keypad_mac` in substitutions before enabling.
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+    interval: 320ms
+    window: 30ms
+  on_ble_manufacturer_data_advertise:
+    - mac_address: ${keypad_mac}
+      manufacturer_id: "0969"
+      then:
+        - lambda: |-
+            if (x.size() < 7) return;
+            const int current = x[6];
+            const int previous = id(keypad_attempt_state);
+            id(keypad_attempt_state) = current;
+            if (previous < 0 || current == previous) return;         // first sighting
+            const int delta = ((current - previous) % 256 + 256) % 256;
+            id(keypad_attempts)->publish_state(current);
+            if (delta >= 2) {
+              ESP_LOGI("keypad", "Accepted PIN (attempt_state %d -> %d)", previous, current);
+              id(keypad_unlock)->execute();
+            } else {
+              ESP_LOGI("keypad", "Rejected PIN (attempt_state %d -> %d)", previous, current);
+              id(keypad_rejections)->publish_state(current);
+            }
+  on_ble_service_data_advertise:
+    - mac_address: ${keypad_mac}
+      service_uuid: FD3D
+      then:
+        - lambda: |-
+            if (x.size() < 3 || (x[0] != 'y' && x[0] != 'Y')) return;
+            id(keypad_battery)->publish_state(x[2] & 0x7F);
+
+globals:
+  - id: keypad_attempt_state
+    type: int
+    restore_value: false
+    initial_value: "-1"
+
+sensor:
+  - platform: template
+    name: "Keypad battery"
+    id: keypad_battery
+    unit_of_measurement: "%"
+    device_class: battery
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Keypad attempt counter"
+    id: keypad_attempts
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Keypad last rejection"
+    id: keypad_rejections
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: wifi_signal
+    name: "WiFi signal"
+    entity_category: diagnostic
+    update_interval: 60s
