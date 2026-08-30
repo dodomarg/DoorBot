@@ -6,8 +6,6 @@ url: https://github.com/dodomarg/DoorBot
 arch:
   - aarch64
   - amd64
-  - armv7
-  - armhf
 init: false
 startup: services
 boot: auto
@@ -18,7 +16,7 @@ panel_title: DoorBot
 hassio_api: true
 homeassistant_api: true
 map:
-  - addon_config:rw
+  - app_config:rw
 options:
   backend: mock
   lock_entity: lock.doorbot_lock
