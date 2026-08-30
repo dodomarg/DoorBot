@@ -47,7 +47,12 @@ external_components:
     components: [switchbot_keypad_bridge]
 
 logger:
-  baud_rate: 0  # UART0 is used for the servo bus; log over USB CDC / OTA instead
+  # The servo bus occupies GPIO43/44, which are UART0's default pins, so the
+  # normal serial console is unavailable. The ESP32-S3 has a separate
+  # USB-Serial/JTAG peripheral wired to the USB-C port, so logs still come out
+  # over the same cable used for flashing, without disturbing the servo bus.
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
 
 api:
   encryption:
