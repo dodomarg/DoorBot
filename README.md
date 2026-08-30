@@ -133,6 +133,9 @@ component. Full protocol write-up in
   ESP32, so it never appears in your YAML or git.
 - The keypad authenticates the credential; DoorBot authorises it. Turn on
   *"Only allow slots listed below"* to refuse any credential you haven't named.
+- The lock only ever *listens* for Home Assistant on TCP 6053; it never opens a
+  connection to your network, so it is safe to isolate on an IoT VLAN. Ports and
+  firewall rules are in [`docs/network.md`](docs/network.md).
 - Don't expose `/api/verify` to the internet.
 
 ## Licence
