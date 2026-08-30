@@ -95,21 +95,21 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  ap:
-    ssid: "${friendly_name} Setup"
-    password: !secret doorbot_ap_password
 
-# ESPHome warns that this AP has neither captive_portal nor web_server, so it
-# "will not be usable". That is only partly true here: the keypad bridge runs
-# its own HTTP server on port 80, so the AP still reaches the pairing wizard.
+# There is deliberately no fallback `ap:` here, and no captive_portal.
 #
-# captive_portal is deliberately absent. It pulls in web_server_base, which on
-# esp32 pulls in web_server_idf, which includes json_util.h without declaring
-# json as a dependency, so the build fails. Adding web_server would supply the
-# missing json, but it also wants port 80, which the bridge already owns.
+# An AP would be genuinely useless on this device. captive_portal cannot be
+# used, because switchbot_keypad_bridge's own final_validate rejects the
+# `web_server:` component outright ("both bind to port 80 and both define
+# USE_WEBSERVER"), and captive_portal needs web_server_base. So the AP could
+# not re-enter Wi-Fi credentials. It could not finish keypad pairing either:
+# the setup wizard signs in against https://account.api.switchbot.net, and a
+# client parked on the ESP's own AP has no route to the internet.
 #
-# The trade-off: if the Wi-Fi credentials ever stop working, you cannot fix them
-# from the AP, only by reflashing over USB. See docs/network.md.
+# improv_serial is the recovery path instead. Hold the board's BOOT button
+# while plugging in, open https://web.esphome.io, and set new Wi-Fi
+# credentials over the same USB cable used for flashing -- no reflash needed.
+improv_serial:
 
 # The setup wizard's HTTPS call to SwitchBot needs a valid system clock.
 time:

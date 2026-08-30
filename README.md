@@ -68,6 +68,18 @@ The servo bus runs at **1,000,000 baud** (STS3215 factory default) and the
 driver board handles the half-duplex conversion, so a plain UART is all that is
 needed.
 
+Power the servo from the driver board's DC jack, never from USB — the STS3215
+stalls at well over an amp and will brown out the XIAO.
+
+#### Changing Wi-Fi later
+
+The firmware has no fallback access point, because one would be useless here
+(see the comment above `improv_serial:` in `doorbot.yaml`). It ships
+`improv_serial` instead, so new credentials go over the same USB cable used for
+flashing: plug the board in, open <https://web.esphome.io>, **Connect**, then
+**Configure Wi-Fi**. No reflash, and it works from a browser with Web Serial —
+including Firefox 154+, as long as the page is a secure context.
+
 ### 4. Calibrate
 
 Open the add-on → **Calibration**:
