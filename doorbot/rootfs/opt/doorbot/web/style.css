@@ -26,6 +26,14 @@
 
 * { box-sizing: border-box; }
 
+/* The HTML `hidden` attribute is only `display: none` in the user-agent
+   stylesheet, so ANY author rule that sets `display` silently defeats it.
+   `.modal` (display: flex) and `label` (display: flex) both did exactly that,
+   which left the code and credential dialogs permanently on screen and made
+   their Cancel buttons look dead. Author-origin + !important so an element
+   marked hidden is always hidden, whatever else it is styled as. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
