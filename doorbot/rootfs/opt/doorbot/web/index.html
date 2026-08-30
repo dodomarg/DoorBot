@@ -193,19 +193,26 @@
     <div class="card">
       <h2>SwitchBot Keypad</h2>
       <div class="notice">
-        <strong>How this works.</strong> The SwitchBot Keypad checks the PIN itself and
-        then broadcasts an unencrypted BLE advertisement containing a counter
-        (<code>attempt_state</code>). The counter goes up by <strong>1</strong> when a
-        code is rejected and by <strong>2</strong> when it is accepted. DoorBot&rsquo;s ESP32
-        watches for that and can open the lock. It cannot tell you <em>which</em> PIN was
-        used, and the advert is replayable &mdash; so treat it as convenience, not
-        as your only security layer.
+        <strong>How this works.</strong> DoorBot&rsquo;s ESP32 impersonates a SwitchBot Lock
+        over Bluetooth. Your keypad pairs to it and sends every unlock as an
+        <strong>AES-CTR encrypted</strong> message &mdash; the same protocol it would use
+        with a real SwitchBot Lock. That message says <em>how</em> the credential was
+        presented (PIN, fingerprint, NFC or face) and <em>which slot</em> it came from,
+        so DoorBot knows exactly who is at the door.
+        <br><br>
+        Pair it once from the ESP32&rsquo;s own setup page, then it is fully local.
+        <strong>You do not need a SwitchBot Lock.</strong>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>Keypad</span><strong id="kName">&mdash;</strong></div>
+        <div class="metric"><span>Battery</span><strong id="kBatt">&mdash;</strong></div>
+        <div class="metric"><span>Last credential</span><strong id="kWho">&mdash;</strong></div>
+        <div class="metric"><span>Last result</span><strong id="kResult">&mdash;</strong></div>
+        <div class="metric"><span>Last seen</span><strong id="kSeen">&mdash;</strong></div>
       </div>
       <form id="keypadForm" class="grid">
         <label class="check"><input type="checkbox" name="enabled"> Act on keypad events</label>
-        <label>Keypad BLE address
-          <input type="text" name="address" placeholder="AA:BB:CC:DD:EE:FF"></label>
-        <label>On an accepted code
+        <label>On an accepted credential
           <select name="action">
             <option value="unlock">Unlock</option>
             <option value="toggle">Toggle</option>
@@ -213,24 +220,76 @@
           </select></label>
         <label>Minimum seconds between actions
           <input type="number" name="min_interval_seconds" min="0" max="120"></label>
-        <label class="check"><input type="checkbox" name="require_local_pin">
-          Require a DoorBot PIN as well (keypad alone will not open)</label>
+        <label class="check"><input type="checkbox" name="known_credentials_only">
+          Only allow slots listed below (unknown slots are refused)</label>
         <div class="formactions"><button type="submit" class="btn primary">Save</button></div>
       </form>
-      <div class="metrics">
-        <div class="metric"><span>Battery</span><strong id="kBatt">&mdash;</strong></div>
-        <div class="metric"><span>attempt_state</span><strong id="kAttempt">&mdash;</strong></div>
-        <div class="metric"><span>Last result</span><strong id="kResult">&mdash;</strong></div>
-        <div class="metric"><span>Last seen</span><strong id="kSeen">&mdash;</strong></div>
+    </div>
+
+    <div class="card">
+      <div class="cardhead">
+        <h2>Credentials</h2>
+        <button class="btn primary" id="btnAddCred">Add credential</button>
       </div>
+      <p class="muted">
+        Name each slot so the log reads &ldquo;Maya, fingerprint&rdquo; instead of
+        &ldquo;slot 2&rdquo;. Slots are numbered in the order you added them in the
+        SwitchBot app, starting at&nbsp;0. The PIN digits and fingerprint templates
+        stay on the keypad &mdash; DoorBot only stores who the slot belongs to.
+      </p>
+      <div id="credList" class="codelist"></div>
+    </div>
+
+    <div class="card" id="kpSimCard">
       <h3>Simulate</h3>
-      <p class="muted">Send fake advertisements to test the pipeline without the keypad.</p>
+      <p class="muted">Send a fake unlock to test the pipeline without the keypad.</p>
       <div class="row">
-        <button class="btn" id="btnSimReject">Simulate rejected (+1)</button>
-        <button class="btn primary" id="btnSimAccept">Simulate accepted (+2)</button>
+        <select id="simMethod">
+          <option value="pin">PIN</option>
+          <option value="fingerprint">Fingerprint</option>
+          <option value="nfc">NFC tag</option>
+          <option value="face">Face</option>
+        </select>
+        <input type="number" id="simSlot" min="0" max="99" value="0" style="max-width:7rem">
+        <button class="btn primary" id="btnSimUnlock">Simulate unlock</button>
       </div>
     </div>
   </section>
+
+  <!-- ------------------------------------------------------ CREDENTIAL MODAL -->
+  <div class="modal" id="credModal" hidden>
+    <form class="modalbox" id="credForm">
+      <h2 id="credTitle">Add credential</h2>
+      <label>Name <input name="name" required maxlength="40" placeholder="e.g. Maya"></label>
+      <div class="grid2">
+        <label>Presented as
+          <select name="method">
+            <option value="pin">PIN</option>
+            <option value="fingerprint">Fingerprint</option>
+            <option value="nfc">NFC tag</option>
+            <option value="face">Face</option>
+          </select></label>
+        <label>Slot <small>order added in the SwitchBot app, from 0</small>
+          <input type="number" name="slot" min="0" max="99" required value="0"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
+      <label class="check"><input type="checkbox" name="notify"> Notify me when this is used</label>
+      <label class="check"><input type="checkbox" name="duress"> Duress &mdash; opens, but raises an alert</label>
+      <fieldset>
+        <legend>Allowed days</legend>
+        <div class="days" id="credDays"></div>
+      </fieldset>
+      <div class="grid2">
+        <label>From <input type="time" name="start_minute" value="00:00"></label>
+        <label>Until <input type="time" name="end_minute" value="23:59"></label>
+      </div>
+      <label>Note <input name="note" maxlength="80" placeholder="optional"></label>
+      <div class="formactions">
+        <button type="button" class="btn" id="btnCredCancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </div>
 
   <!-- -------------------------------------------------------------- LOG -->
   <section class="panel" id="tab-log">
@@ -286,8 +345,6 @@
 
       <label>Max uses <small>blank = unlimited</small>
         <input type="number" name="max_uses" min="1" max="9999"></label>
-      <label>SwitchBot keypad slot <small>optional, for your own records</small>
-        <input type="number" name="keypad_slot" min="1" max="100"></label>
       <label class="span">Notes
         <textarea name="notes" rows="2"></textarea></label>
 

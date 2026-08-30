@@ -80,8 +80,8 @@ class CodeStore:
             """INSERT INTO codes
                (name, code_hash, code_salt, code_hint, kind, enabled, valid_from,
                 valid_to, days_mask, start_minute, end_minute, max_uses,
-                keypad_slot, notes, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 name,
                 hash_code(code, salt),
@@ -95,7 +95,6 @@ class CodeStore:
                 fields["start_minute"],
                 fields["end_minute"],
                 fields["max_uses"],
-                fields["keypad_slot"],
                 fields["notes"],
                 int(time.time()),
             ),
@@ -123,7 +122,6 @@ class CodeStore:
             "start_minute = ?",
             "end_minute = ?",
             "max_uses = ?",
-            "keypad_slot = ?",
             "notes = ?",
         ]
         params: list[Any] = [
@@ -136,7 +134,6 @@ class CodeStore:
             fields["start_minute"],
             fields["end_minute"],
             fields["max_uses"],
-            fields["keypad_slot"],
             fields["notes"],
         ]
 
@@ -292,9 +289,6 @@ class CodeStore:
         else:
             max_uses = int(max_uses)
 
-        slot = pick("keypad_slot", None)
-        slot = int(slot) if str(slot).strip() not in ("", "None") else None
-
         valid_from, valid_to = as_ts("valid_from"), as_ts("valid_to")
         if valid_from and valid_to and valid_to <= valid_from:
             raise CodeError("The end date must be after the start date.")
@@ -312,7 +306,6 @@ class CodeStore:
             "start_minute": max(0, min(1440, as_int("start_minute", 0))),
             "end_minute": max(0, min(1440, as_int("end_minute", 1440))),
             "max_uses": max_uses,
-            "keypad_slot": slot,
             "notes": str(pick("notes", "")),
         }
 

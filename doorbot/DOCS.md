@@ -135,14 +135,38 @@ automation:
 
 ## SwitchBot Keypad
 
-If you have a SwitchBot Keypad (non-touch), the ESP32 can watch its BLE
-advertisement and unlock when the keypad reports an accepted PIN. Configure the
-throttle and the safety switch under the **Keypad** tab.
+DoorBot's ESP32 impersonates a SwitchBot Lock, so your keypad pairs to it and
+sends every unlock over the genuine **AES-CTR encrypted** lock protocol. Each
+message says how the credential was presented and which slot it came from —
+so DoorBot knows who is at the door.
 
-**Read this before relying on it.** The advertisement is *unencrypted*, so it is
-replayable, and it does *not* say which PIN was entered — only accepted or
-rejected. Enable **Require a DoorBot PIN as well** if that matters to you. Full
-details in `docs/switchbot-keypad.md` in the repository.
+**No SwitchBot Lock is required.** Pair once from the ESP32's own setup page
+(browse to its IP, sign in to your SwitchBot account, pick the keypad), and
+everything after that is local.
+
+### Credentials
+
+Under **Keypad → Credentials**, name each slot. Slots are numbered in the order
+you added them in the SwitchBot app, **starting at 0**, and each method has its
+own numbering — `fingerprint` slot 0 and `pin` slot 0 are different credentials.
+
+| Field | What it does |
+|---|---|
+| **Name** | Shown in the log and in HA events |
+| **Presented as** | PIN, fingerprint, NFC tag or face |
+| **Slot** | The credential index from the SwitchBot app |
+| **Allowed days / hours** | Refuse this credential outside its window |
+| **Notify** | Flag the event so an automation can alert you |
+| **Duress** | Opens the door, but raises a duress alert |
+
+The PIN digits and fingerprint templates never leave the keypad — DoorBot only
+stores who a slot belongs to and when it's allowed.
+
+Turn on **Only allow slots listed below** to refuse any credential you haven't
+named here. Leave it off and unknown slots still work, they're just logged
+anonymously.
+
+Full protocol write-up in `docs/switchbot-keypad.md` in the repository.
 
 ## Troubleshooting
 

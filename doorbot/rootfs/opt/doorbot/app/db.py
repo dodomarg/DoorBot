@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS codes (
     max_uses      INTEGER,
     use_count     INTEGER NOT NULL DEFAULT 0,
     last_used     INTEGER,
-    keypad_slot   INTEGER,
     notes         TEXT    NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL
 );

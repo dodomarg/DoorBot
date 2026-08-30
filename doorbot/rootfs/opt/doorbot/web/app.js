@@ -5,7 +5,7 @@ const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const state = { status: null, codes: [], keypad: null, pin: '', days: 127, poll: null };
+const state = { status: null, codes: [], keypad: null, pin: '', days: 127, credDays: 127, poll: null };
 
 /* ------------------------------------------------------------------ http */
 /* Ingress serves the app from a random prefix, so resolve API calls against the
@@ -93,11 +93,76 @@ function renderStatus(status) {
 
 function renderKeypad(kp) {
   state.keypad = kp;
+  $('#kName').textContent = kp.keypad_name || (kp.paired ? 'Paired' : 'Not paired yet');
   $('#kBatt').textContent = kp.battery != null ? `${kp.battery}%` : '—';
-  $('#kAttempt').textContent = kp.last_attempt_state ?? '—';
+  $('#kWho').textContent = kp.last_method
+    ? describeCredential(kp.last_method, kp.last_slot, kp.credentials)
+    : '—';
   $('#kResult').textContent = kp.last_result || '—';
   $('#kSeen').textContent = kp.last_seen ? new Date(kp.last_seen * 1000).toLocaleTimeString() : '—';
   if (!$('#keypadForm').dataset.dirty) fillForm($('#keypadForm'), kp.settings || {});
+  renderCredentials(kp.credentials || []);
+}
+
+function describeCredential(method, slot, credentials) {
+  const known = (credentials || []).find((c) => c.method === method && c.slot === slot);
+  const label = known ? known.label : method;
+  return known ? `${known.name} · ${label}` : `${label} slot ${slot}`;
+}
+
+function renderCredentials(creds) {
+  const list = $('#credList');
+  list.innerHTML = '';
+  if (!creds.length) {
+    list.innerHTML = '<p class="muted">No credentials named yet. Add one to see who unlocked the door.</p>';
+    return;
+  }
+  creds.forEach((cred) => {
+    const row = document.createElement('div');
+    row.className = `codeitem ${cred.enabled ? '' : 'off'}`;
+    const days = cred.days_mask === 127
+      ? 'every day'
+      : DAYS.filter((_, i) => (cred.days_mask >> i) & 1).join(' ') || 'never';
+    const window = (cred.start_minute === 0 && cred.end_minute >= 1439)
+      ? '' : ` · ${minutesToTime(cred.start_minute)}–${minutesToTime(cred.end_minute)}`;
+    const tags = [];
+    if (cred.duress) tags.push('<span class="tag duress">duress</span>');
+    if (cred.notify) tags.push('<span class="tag recurring">notify</span>');
+    row.innerHTML = `
+      <div class="grow">
+        <h4>${cred.icon} ${escapeHtml(cred.name)} ${tags.join(' ')}</h4>
+        <div class="meta">${cred.label} · slot ${cred.slot} · ${days}${window}${cred.note ? ` · ${escapeHtml(cred.note)}` : ''}</div>
+      </div>
+      <button class="btn small" data-edit="${cred.key}">Edit</button>
+      <button class="btn small danger ghost" data-del="${cred.key}">Delete</button>`;
+    row.querySelector('[data-edit]').onclick = () => openCredModal(cred);
+    row.querySelector('[data-del]').onclick = () => run(async () => {
+      await api(`keypad/credentials/${encodeURIComponent(cred.key)}`, { method: 'DELETE' });
+      await refreshStatus();
+    }, 'Credential removed');
+    list.appendChild(row);
+  });
+}
+
+function openCredModal(cred) {
+  const form = $('#credForm');
+  form.reset();
+  $('#credTitle').textContent = cred ? 'Edit credential' : 'Add credential';
+  state.credDays = cred ? cred.days_mask : 127;
+  if (cred) {
+    fillForm(form, cred);
+    form.elements.start_minute.value = minutesToTime(cred.start_minute);
+    form.elements.end_minute.value = minutesToTime(cred.end_minute);
+    // Method+slot are the identity, so editing one in place would orphan the old key.
+    form.elements.method.disabled = true;
+    form.elements.slot.readOnly = true;
+  } else {
+    form.elements.enabled.checked = true;
+    form.elements.method.disabled = false;
+    form.elements.slot.readOnly = false;
+  }
+  renderDayPicker('#credDays', 'credDays');
+  $('#credModal').hidden = false;
 }
 
 function describeCode(code) {
@@ -110,7 +175,6 @@ function describeCode(code) {
   if (code.valid_to) bits.push(`until ${new Date(code.valid_to * 1000).toLocaleDateString()}`);
   if (code.max_uses) bits.push(`${code.use_count}/${code.max_uses} uses`);
   else if (code.use_count) bits.push(`used ${code.use_count}×`);
-  if (code.keypad_slot) bits.push(`slot ${code.keypad_slot}`);
   return bits.join(' · ') || 'always valid';
 }
 
@@ -211,14 +275,18 @@ function openCodeModal(code) {
 }
 
 function renderDays() {
-  const picker = $('#daysPicker');
+  renderDayPicker('#daysPicker', 'days');
+}
+
+function renderDayPicker(selector, key) {
+  const picker = $(selector);
   picker.innerHTML = '';
   DAYS.forEach((day, index) => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `day ${(state.days >> index) & 1 ? 'on' : ''}`;
+    btn.className = `day ${(state[key] >> index) & 1 ? 'on' : ''}`;
     btn.textContent = day;
-    btn.onclick = () => { state.days ^= (1 << index); renderDays(); };
+    btn.onclick = () => { state[key] ^= (1 << index); renderDayPicker(selector, key); };
     picker.appendChild(btn);
   });
 }
@@ -369,22 +437,50 @@ function bindEvents() {
     }, 'Keypad settings saved');
   };
 
-  const simulate = (step) => run(async () => {
-    const current = state.keypad?.last_attempt_state ?? 0;
+  const simulate = () => run(async () => {
     const result = await api('keypad/event', {
       method: 'POST',
-      body: { attempt_state: (current + step) % 256, battery: state.keypad?.battery ?? 87 },
+      body: {
+        method: $('#simMethod').value,
+        slot: Number($('#simSlot').value || 0),
+        keypad: state.keypad?.keypad_name || 'Simulated keypad',
+        battery: state.keypad?.battery ?? 87,
+      },
     });
     await refreshStatus();
-    toast(`Keypad reported: ${result.result}${result.acted ? ' → lock actuated' : ''}`);
+    const who = result.name ? `${result.name} (${result.method_label})` : `${result.method_label} slot ${result.slot}`;
+    if (result.result === 'accepted') {
+      toast(`${who} accepted${result.acted ? ' → lock actuated' : ''}`);
+    } else {
+      toast(`${who}: ${result.reason || result.result}`, true);
+    }
   });
-  $('#btnSimAccept').onclick = () => simulate(2);
-  $('#btnSimReject').onclick = () => simulate(1);
+  $('#btnSimUnlock').onclick = simulate;
+
+  // Keypad credentials
+  $('#btnAddCred').onclick = () => openCredModal(null);
+  $('#btnCredCancel').onclick = () => { $('#credModal').hidden = true; };
+  $('#credForm').onsubmit = (ev) => {
+    ev.preventDefault();
+    const form = $('#credForm');
+    const body = readForm(form);
+    // Method is disabled while editing (it is half the identity), so read it
+    // explicitly rather than relying on how disabled fields are serialised.
+    body.method = form.elements.method.value;
+    body.days_mask = state.credDays;
+    run(async () => {
+      await api('keypad/credentials', { method: 'POST', body });
+      $('#credModal').hidden = true;
+      await refreshStatus();
+    }, 'Credential saved');
+  };
 
   $('#btnRefreshLog').onclick = () => run(refreshLog);
 
   document.addEventListener('keydown', (ev) => {
-    if ($('#codeModal').hidden === false && ev.key === 'Escape') $('#codeModal').hidden = true;
+    if (ev.key !== 'Escape') return;
+    if ($('#codeModal').hidden === false) $('#codeModal').hidden = true;
+    if ($('#credModal').hidden === false) $('#credModal').hidden = true;
   });
 }
 

@@ -6,13 +6,16 @@ Adapter)**, controlled from **Home Assistant**, with an add-on for calibration
 and PIN management — and optional PIN entry from a **SwitchBot Keypad**.
 
 ```
-                 BLE advert                 Wi-Fi / ESPHome API
+              encrypted BLE                Wi-Fi / ESPHome API
 SwitchBot Keypad ───────────► XIAO ESP32S3 ────────────────────► Home Assistant
-                              + STS3215                              │
-                                 │                                   │
+  (PIN / NFC /                + STS3215                              │
+   fingerprint / face)           │                                   │
                             deadbolt turn                     DoorBot add-on
                                                         (calibration + PIN codes)
 ```
+
+The ESP32 impersonates a SwitchBot Lock, so the keypad pairs to it and sends
+every unlock **encrypted** — including *which* credential was used.
 
 ## What's in here
 
@@ -99,28 +102,37 @@ NFC tag automation, a wired keypad, or the built-in virtual keypad.
 
 ## SwitchBot Keypad
 
-See [`docs/switchbot-keypad.md`](docs/switchbot-keypad.md) for the full
-protocol write-up. Short version:
+DoorBot's ESP32 pretends to be a SwitchBot Lock. Your keypad pairs to it and
+talks the genuine, **AES-CTR encrypted** lock protocol — so every unlock says
+how it was presented (**PIN, NFC, fingerprint or face**) and **which credential
+slot** it came from.
 
-- The keypad checks the PIN **itself** and broadcasts an **unencrypted** BLE
-  advertisement containing a counter (`attempt_state`).
-- The counter goes up by **1** on a rejected PIN and by **2** on an accepted one.
-- The ESP32 watches for that and can open the lock — no SwitchBot Lock, hub or
-  cloud needed for the *reading* side.
+That means you get real per-person access control:
 
-⚠️ **Important limitations:** the advert is unencrypted and replayable, and it
-does not tell you *which* PIN was used. Also, programming PINs into the keypad
-is done in the SwitchBot app, which normally requires pairing it to a real
-SwitchBot Lock. Treat the keypad as a convenience trigger and keep DoorBot's own
-PIN validation as the real access control.
+- Name each slot, so the log reads "Maya, fingerprint" instead of "slot 2"
+- Give a slot its own schedule — the cleaner's PIN only works Tuesday mornings
+- Disable one credential without reprogramming the keypad
+- Flag a slot as **duress**: it opens the door but raises an alert
+- Optionally refuse any slot you haven't named in DoorBot
+
+**No SwitchBot Lock required.** You sign in to your SwitchBot account once, from
+the ESP32's own setup page, so it can fetch the keypad's communication key.
+After that it is entirely local.
+
+Pairing is handled by the excellent
+[switchbot-keypad-bridge](https://github.com/pierluigizagaria/switchbot-keypad-bridge)
+component. Full protocol write-up in
+[`docs/switchbot-keypad.md`](docs/switchbot-keypad.md).
 
 ## Security notes
 
 - PINs are hashed, never stored or logged in the clear.
 - The add-on binds to `0.0.0.0:8099` inside its container and is only reachable
   through Home Assistant **ingress** (so it inherits HA authentication).
-- Keypad BLE events are advisory. Enable *"Require a DoorBot PIN as well"* if
-  you don't want a replayed advertisement to be able to open the door.
+- Keypad traffic is encrypted end to end and the session key is generated on the
+  ESP32, so it never appears in your YAML or git.
+- The keypad authenticates the credential; DoorBot authorises it. Turn on
+  *"Only allow slots listed below"* to refuse any credential you haven't named.
 - Don't expose `/api/verify` to the internet.
 
 ## Licence

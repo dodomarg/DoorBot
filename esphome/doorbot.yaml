@@ -13,9 +13,6 @@
 substitutions:
   device_name: doorbot
   friendly_name: DoorBot
-  # Set this once you know your keypad's BLE address, then uncomment the
-  # esp32_ble_tracker triggers below.
-  keypad_mac: "AA:BB:CC:DD:EE:FF"
 
 esphome:
   name: ${device_name}
@@ -28,8 +25,15 @@ esphome:
 
 esp32:
   board: seeed_xiao_esp32s3
+  variant: esp32s3
+  flash_size: 8MB
   framework:
     type: esp-idf
+
+# The keypad bridge's setup wizard and NimBLE stack want the XIAO's PSRAM.
+psram:
+  mode: octal
+  speed: 80MHz
 
 external_components:
   - source:
@@ -39,6 +43,8 @@ external_components:
   # When running from GitHub instead, swap the block above for:
   # - source: github://dodomarg/DoorBot@main
   #   components: [sts3215]
+  - source: github://pierluigizagaria/switchbot-keypad-bridge
+    components: [switchbot_keypad_bridge]
 
 logger:
   baud_rate: 0  # UART0 is used for the servo bus; log over USB CDC / OTA instead
@@ -88,7 +94,13 @@ wifi:
     ssid: "${friendly_name} Setup"
     password: !secret doorbot_ap_password
 
-captive_portal:
+# No captive_portal: the keypad bridge serves its own setup page on port 80,
+# and captive_portal drags in web_server_idf without its json dependency.
+
+# The setup wizard's HTTPS call to SwitchBot needs a valid system clock.
+time:
+  - platform: sntp
+    id: sntp_time
 
 # ---------------------------------------------------------------- servo bus
 uart:
@@ -309,89 +321,45 @@ script:
             - homeassistant.event:
                 event: esphome.doorbot_jammed
 
-  - id: keypad_unlock
-    mode: single
-    then:
-      - lock.unlock: door_lock
-      - homeassistant.event:
-          event: esphome.doorbot_keypad
-          data:
-            result: accepted
-
-# -------------------------------------------------- SwitchBot Keypad (BLE)
+# ------------------------------------------- SwitchBot Keypad (encrypted)
 #
-# The SwitchBot Keypad validates the PIN itself and then broadcasts an
-# UNENCRYPTED advertisement:
-#   service data 0xFD3D : [0] model char 'y', [2] & 0x7F = battery %
-#   manufacturer 0x0969 : [6] = attempt_state, an 8-bit wrapping counter
-# The counter advances by 1 for a rejected PIN and by 2 for an accepted one.
+# The ESP32 impersonates a SwitchBot Lock over BLE. A genuine SwitchBot Keypad
+# pairs to it and every credential arrives as an AES-CTR encrypted frame that
+# says HOW it was presented (pin / nfc / fingerprint / face) and WHICH slot it
+# came from -- so DoorBot knows who is at the door.
 #
-# Because the advert is unencrypted it is replayable and does not identify
-# which PIN was used. Keep this as a convenience path only.
+# Setup is a one-time on-device wizard: browse to the ESP32's IP, sign in to
+# your SwitchBot account, pick the keypad. After that it is entirely local.
+# No SwitchBot Lock is required.
 #
-# Set `keypad_mac` in substitutions before enabling.
-esp32_ble_tracker:
-  scan_parameters:
-    active: false
-    interval: 320ms
-    window: 30ms
-  on_ble_manufacturer_data_advertise:
-    - mac_address: ${keypad_mac}
-      manufacturer_id: "0969"
-      then:
-        - lambda: |-
-            if (x.size() < 7) return;
-            const int current = x[6];
-            const int previous = id(keypad_attempt_state);
-            id(keypad_attempt_state) = current;
-            if (previous < 0 || current == previous) return;         // first sighting
-            const int delta = ((current - previous) % 256 + 256) % 256;
-            id(keypad_attempts)->publish_state(current);
-            if (delta >= 2) {
-              ESP_LOGI("keypad", "Accepted PIN (attempt_state %d -> %d)", previous, current);
-              id(keypad_unlock)->execute();
-            } else {
-              ESP_LOGI("keypad", "Rejected PIN (attempt_state %d -> %d)", previous, current);
-              id(keypad_rejections)->publish_state(current);
-            }
-  on_ble_service_data_advertise:
-    - mac_address: ${keypad_mac}
-      service_uuid: FD3D
-      then:
-        - lambda: |-
-            if (x.size() < 3 || (x[0] != 'y' && x[0] != 'Y')) return;
-            id(keypad_battery)->publish_state(x[2] & 0x7F);
-
-globals:
-  - id: keypad_attempt_state
-    type: int
-    restore_value: false
-    initial_value: "-1"
+# Note: this drives NimBLE directly and cannot coexist with esp32_ble_tracker.
+switchbot_keypad_bridge:
+  id: keypad
+  keypad:
+    name: "Keypad"
+  keypad_action:
+    name: "Keypad action"
+  keypad_battery_level:
+    name: "Keypad battery"
+  reset_button:
+    name: "Re-link keypad"
+  on_unlock:
+    - homeassistant.event:
+        event: esphome.doorbot_keypad
+        data:
+          method: !lambda 'return method;'
+          slot: !lambda 'return to_string(index);'
+    - logger.log:
+        format: "Keypad unlock: %s slot %d"
+        args: ['method.c_str()', 'index']
+    - lock.unlock: door_lock
+  on_lock:
+    - lock.lock: door_lock
+  on_doorbell:
+    - homeassistant.event:
+        event: esphome.doorbot_doorbell
 
 sensor:
-  - platform: template
-    name: "Keypad battery"
-    id: keypad_battery
-    unit_of_measurement: "%"
-    device_class: battery
-    accuracy_decimals: 0
-    entity_category: diagnostic
-    update_interval: never
-
-  - platform: template
-    name: "Keypad attempt counter"
-    id: keypad_attempts
-    accuracy_decimals: 0
-    entity_category: diagnostic
-    update_interval: never
-
-  - platform: template
-    name: "Keypad last rejection"
-    id: keypad_rejections
-    accuracy_decimals: 0
-    entity_category: diagnostic
-    update_interval: never
-
   - platform: wifi_signal
     name: "WiFi signal"
     entity_category: diagnostic

@@ -135,6 +135,8 @@ class DoorBotApp:
 
         r.add("GET", "/api/keypad", lambda rq: self.keypad.snapshot())
         r.add("POST", "/api/keypad/settings", self.api_keypad_settings)
+        r.add("POST", "/api/keypad/credentials", self.api_keypad_credentials)
+        r.add("DELETE", "/api/keypad/credentials/{key}", self.api_keypad_credential_delete)
         r.add("POST", "/api/keypad/event", self.api_keypad_event)
 
         r.add("POST", "/api/dev/jam", self.api_dev_jam)
@@ -267,41 +269,73 @@ class DoorBotApp:
     def api_keypad_settings(self, rq: Request) -> dict[str, Any]:
         return self.keypad.save_settings(rq.body)
 
-    def api_keypad_event(self, rq: Request) -> dict[str, Any]:
-        """Called by the ESP32 (or an HA automation) with a raw attempt_state."""
+    def api_keypad_credentials(self, rq: Request) -> dict[str, Any]:
         try:
-            attempt_state = int(rq.body["attempt_state"]) & 0xFF
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ApiError("attempt_state (0-255) is required.") from exc
+            saved = self.keypad.save_credential(rq.body)
+        except ValueError as exc:
+            raise ApiError(str(exc)) from exc
+        return {"credential": saved, "keypad": self.keypad.snapshot()}
 
-        battery = rq.body.get("battery")
+    def api_keypad_credential_delete(self, rq: Request, key: str = "") -> dict[str, Any]:
+        try:
+            self.keypad.delete_credential(key)
+        except KeyError as exc:
+            raise ApiError("No such credential.", 404) from exc
+        return {"keypad": self.keypad.snapshot()}
+
+    def api_keypad_event(self, rq: Request) -> dict[str, Any]:
+        """Called by the ESP32 bridge with a decrypted keypad unlock frame.
+
+        The keypad has already authenticated the credential over its encrypted
+        channel, so the payload identifies *which* credential was used rather
+        than carrying any secret:
+
+            {"method": "fingerprint", "slot": 0, "keypad": "Front door"}
+        """
+        body = rq.body or {}
+        if "method" not in body:
+            raise ApiError("method (pin|nfc|fingerprint|face) is required.")
+        try:
+            slot = int(body.get("slot", body.get("index")))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("slot (the credential index) is required.") from exc
+
+        battery = body.get("battery")
         outcome = self.keypad.ingest(
-            attempt_state,
-            int(battery) if battery is not None else None,
-            str(rq.body.get("address", "")),
+            body["method"],
+            slot,
+            keypad_name=str(body.get("keypad", "")),
+            battery=int(battery) if battery is not None else None,
+            address=str(body.get("address", "")),
         )
 
         settings = outcome["settings"]
+        actor = outcome["name"] or f"keypad:{outcome['method']}:{outcome['slot']}"
         acted = False
-        if (
-            outcome["result"] == RESULT_ACCEPTED
-            and settings["enabled"]
-            and not settings["require_local_pin"]
-            and settings["action"] != "notify"
-        ):
+        if outcome["result"] == RESULT_ACCEPTED and settings["action"] != "notify":
             try:
                 if settings["action"] == "toggle":
-                    self.controller.toggle(actor="switchbot-keypad")
+                    self.controller.toggle(actor=actor)
                 else:
-                    self.controller.unlock(actor="switchbot-keypad")
+                    self.controller.unlock(actor=actor)
                 acted = True
             except BackendError as exc:
                 raise ApiError(str(exc), 409) from exc
 
         self._forward_to_hass(
-            "keypad", {"result": outcome["result"], "acted": acted}
+            "keypad",
+            {
+                "result": outcome["result"],
+                "method": outcome["method"],
+                "slot": outcome["slot"],
+                "name": outcome["name"],
+                "known": outcome["known"],
+                "duress": outcome["duress"],
+                "acted": acted,
+            },
         )
         outcome["acted"] = acted
+        outcome["status"] = self.controller.status()
         return outcome
 
     def api_dev_jam(self, rq: Request) -> dict[str, Any]:
