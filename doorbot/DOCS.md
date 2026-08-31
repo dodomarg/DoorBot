@@ -25,6 +25,9 @@ position_number_entity: number.doorbot_target_position
 position_sensor_entity: sensor.doorbot_position
 load_sensor_entity: sensor.doorbot_load
 torque_switch_entity: switch.doorbot_servo_torque
+moving_binary_sensor_entity: binary_sensor.doorbot_moving
+holding_binary_sensor_entity: binary_sensor.doorbot_holding_position
+move_result_entity: sensor.doorbot_last_move
 auto_lock_seconds: 0
 max_failed_attempts: 5
 lockout_seconds: 300
@@ -49,6 +52,12 @@ created. With the stock `esphome/doorbot.yaml` from the repo and a device named
 | `position_sensor_entity` | Read, for the live position |
 | `load_sensor_entity` | Read, for jam detection |
 | `torque_switch_entity` | Toggled, to release the servo during calibration |
+| `moving_binary_sensor_entity` | Read, to know when a turn has finished |
+| `holding_binary_sensor_entity` | Read, to confirm the servo is really holding |
+| `move_result_entity` | Read, for how the last move ended (arrived / jammed / timeout) |
+
+The last three are how DoorBot verifies a move instead of assuming it worked.
+If they are wrong, every lock and unlock will be reported as a failure.
 
 ### `auto_lock_seconds`
 

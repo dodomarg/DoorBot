@@ -58,17 +58,31 @@ api:
   encryption:
     key: !secret doorbot_api_key
   actions:
+    # Closed loop: the move is verified, and "Last move" reports how it ended.
     - action: move_to
       variables:
         position: int
         speed: int
       then:
-        - lambda: 'id(bolt)->move_to(position, speed);'
+        - lambda: 'id(bolt)->start_move((int32_t) position, speed);'
+    - action: stop
+      then:
+        - lambda: 'id(bolt)->abort_move();'
     - action: set_torque
       variables:
         enabled: bool
       then:
         - lambda: 'id(bolt)->set_torque(enabled);'
+    - action: hold_open
+      variables:
+        seconds: int
+      then:
+        # A one-off override. Writing to the hold_seconds number instead would
+        # permanently change the user's saved setting, since it is restored
+        # from flash - a service call with seconds:0 would quietly disable
+        # hold-open forever.
+        - lambda: 'id(hold_override) = seconds;'
+        - script.execute: open_door
     - action: capture_position
       variables:
         which: string
@@ -86,7 +100,21 @@ api:
         direction: int
         load_threshold: int
       then:
-        - lambda: 'id(bolt)->home_to_stall(direction, load_threshold, 1200, 300);'
+        - lambda: 'id(bolt)->start_seek_stall(direction, load_threshold, 6000, 200);'
+    # Servo programming, so none of this needs Feetech's Windows tool.
+    - action: configure_servo
+      variables:
+        multi_turn: bool
+        torque_limit: int
+        max_torque: int
+      then:
+        - lambda: |-
+            id(bolt)->apply_multi_turn(multi_turn);
+            id(bolt)->set_torque_limit((uint16_t) torque_limit);
+            id(bolt)->set_max_torque((uint16_t) max_torque);
+    - action: recenter_servo
+      then:
+        - lambda: 'id(bolt)->recenter_here();'
 
 ota:
   - platform: esphome
@@ -131,12 +159,28 @@ sts3215:
   uart_id: servo_bus
   servo_id: 1
   update_interval: 1s
+  # Multi-turn absolute mode: the official ST3215 register map says that with
+  # both angle limits set to 0 the goal register accepts -30719..30719 instead
+  # of 0..4095, which is what a euro cylinder needing two or three full turns
+  # requires. The revolution count is lost on power loss, so the lock re-reads
+  # its position on boot rather than assuming it.
+  multi_turn: true
+  # A move only counts as finished once the servo is within this many steps of
+  # the goal for two consecutive samples.
+  tolerance: 25
+  jam_load: 850
+  move_timeout: 12s
   position:
     name: "Position"
     id: servo_position
+  turns:
+    name: "Turns"
+    id: servo_turns
   load:
     name: "Load"
     id: servo_load
+  current:
+    name: "Servo current"
   voltage:
     name: "Servo voltage"
   temperature:
@@ -147,6 +191,18 @@ sts3215:
   online:
     name: "Servo online"
     id: servo_online
+  holding:
+    name: "Holding position"
+    id: servo_holding
+  overload:
+    name: "Servo overload"
+    id: servo_overload
+  move_result:
+    name: "Last move"
+    id: servo_move_result
+  error:
+    name: "Servo fault"
+    id: servo_error
 
 # ------------------------------------------------------------- calibration
 # These are plain template numbers with restore_value, so the calibration
@@ -158,8 +214,8 @@ number:
     optimistic: true
     restore_value: true
     initial_value: 2048
-    min_value: 0
-    max_value: 4095
+    min_value: -30719
+    max_value: 30719
     step: 1
     mode: box
     entity_category: config
@@ -170,8 +226,8 @@ number:
     optimistic: true
     restore_value: true
     initial_value: 1024
-    min_value: 0
-    max_value: 4095
+    min_value: -30719
+    max_value: 30719
     step: 1
     mode: box
     entity_category: config
@@ -179,13 +235,13 @@ number:
   - platform: template
     name: "Target position"
     id: target_position
-    min_value: 0
-    max_value: 4095
+    min_value: -30719
+    max_value: 30719
     step: 1
-    mode: slider
+    mode: box
     optimistic: true
     set_action:
-      - lambda: 'id(bolt)->move_to((int) x);'
+      - lambda: 'id(bolt)->start_move((int32_t) x, (int) id(move_speed).state);'
 
   - platform: template
     name: "Speed"
@@ -194,7 +250,7 @@ number:
     restore_value: true
     initial_value: 800
     min_value: 50
-    max_value: 4000
+    max_value: 3400
     step: 50
     mode: box
     entity_category: config
@@ -237,17 +293,149 @@ number:
     mode: box
     entity_category: config
 
+  # --- holding the latch open --------------------------------------------
+  # On a door whose outside handle is passive, unlocking is not enough: the
+  # latch has to be pulled back and kept back while somebody pushes the door.
+  # These two settle how far past "unlocked" to turn, and for how long.
+  - platform: template
+    name: "Hold open position"
+    id: hold_position
+    optimistic: true
+    restore_value: true
+    initial_value: 1024
+    min_value: -30719
+    max_value: 30719
+    step: 1
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Hold open seconds"
+    id: hold_seconds
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: 0
+    max_value: 60
+    step: 1
+    mode: box
+    unit_of_measurement: s
+    entity_category: config
+
+  # --- servo programming, all of it reachable from Home Assistant ---------
+  # Every one of these writes the servo's own registers, so the STS3215 never
+  # has to be plugged into Feetech's Windows tool.
+  - platform: template
+    name: "Max torque"
+    id: max_torque
+    optimistic: true
+    restore_value: true
+    initial_value: 1000
+    min_value: 0
+    max_value: 1000
+    step: 10
+    mode: box
+    entity_category: config
+    set_action:
+      - lambda: 'if (id(bolt)->online()) id(bolt)->set_max_torque((uint16_t) x);'
+
+  - platform: template
+    name: "Overload torque"
+    id: overload_torque
+    optimistic: true
+    restore_value: true
+    initial_value: 80
+    min_value: 10
+    max_value: 100
+    step: 1
+    mode: box
+    unit_of_measurement: "%"
+    entity_category: config
+    set_action:
+      - lambda: |-
+          if (id(bolt)->online())
+            id(bolt)->set_protection((uint8_t) x, (uint16_t) id(protection_time).state,
+                                     (uint8_t) id(protective_torque).state);
+
+  - platform: template
+    name: "Protection time"
+    id: protection_time
+    optimistic: true
+    restore_value: true
+    initial_value: 2000
+    min_value: 100
+    max_value: 2540
+    step: 10
+    mode: box
+    unit_of_measurement: ms
+    entity_category: config
+    set_action:
+      - lambda: |-
+          if (id(bolt)->online())
+            id(bolt)->set_protection((uint8_t) id(overload_torque).state, (uint16_t) x,
+                                     (uint8_t) id(protective_torque).state);
+
+  - platform: template
+    name: "Protective torque"
+    id: protective_torque
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    min_value: 0
+    max_value: 100
+    step: 1
+    mode: box
+    unit_of_measurement: "%"
+    entity_category: config
+    set_action:
+      - lambda: |-
+          if (id(bolt)->online())
+            id(bolt)->set_protection((uint8_t) id(overload_torque).state,
+                                     (uint16_t) id(protection_time).state, (uint8_t) x);
+
+  - platform: template
+    name: "Servo ID"
+    id: servo_id_number
+    optimistic: true
+    restore_value: true
+    initial_value: 1
+    min_value: 0
+    max_value: 253
+    step: 1
+    mode: box
+    entity_category: config
+
 switch:
+  # Not optimistic: the state shown is register 40 read back from the servo,
+  # refreshed every update interval, so "on" means the servo confirmed it.
   - platform: template
     name: "Servo torque"
     id: servo_torque
-    optimistic: true
-    restore_mode: ALWAYS_ON
+    restore_mode: DISABLED
     entity_category: config
+    lambda: |-
+      if (!id(bolt)->online())
+        return {};
+      return id(bolt)->torque_on();
     turn_on_action:
       - lambda: 'id(bolt)->set_torque(true);'
     turn_off_action:
       - lambda: 'id(bolt)->set_torque(false);'
+
+  # The servo drops to "Protective torque" if it exceeds "Overload torque" for
+  # longer than "Protection time". That is what stops it cooking itself, but it
+  # is also what makes it let go of a held latch. Turn this off only if you
+  # understand that the servo will then happily stall until it burns out.
+  - platform: template
+    name: "Overload protection"
+    id: overload_protection
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    turn_on_action:
+      - lambda: 'if (id(bolt)->online()) id(bolt)->set_overload_protection_enabled(true);'
+    turn_off_action:
+      - lambda: 'if (id(bolt)->online()) id(bolt)->set_overload_protection_enabled(false);'
 
 button:
   - platform: template
@@ -266,6 +454,46 @@ button:
           if (id(bolt)->position() >= 0)
             id(unlocked_position).publish_state(id(bolt)->position());
 
+  # Drive gently until the mechanism stops us, and record where that was. This
+  # is the same idea as SwitchBot's calibration: let the door tell us its limits
+  # instead of typing numbers in.
+  - platform: template
+    name: "Find locked end stop"
+    entity_category: config
+    on_press:
+      - script.execute: seek_and_capture_locked
+
+  - platform: template
+    name: "Find unlocked end stop"
+    entity_category: config
+    on_press:
+      - script.execute: seek_and_capture_unlocked
+
+  - platform: template
+    name: "Re-centre servo here"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          if (id(bolt)->recenter_here())
+            ESP_LOGI("doorbot", "Servo re-centred; this position now reads 2048");
+
+  - platform: template
+    name: "Ping servo"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          const bool ok = id(bolt)->ping();
+          ESP_LOGI("doorbot", "Servo %u %s", id(bolt)->servo_id(), ok ? "answered" : "did not answer");
+
+  - platform: template
+    name: "Apply servo ID"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          const uint8_t wanted = (uint8_t) id(servo_id_number).state;
+          if (id(bolt)->servo_id() != wanted)
+            id(bolt)->change_servo_id(wanted);
+
   - platform: restart
     name: "Restart"
 
@@ -278,34 +506,59 @@ lock:
     lambda: |-
       if (!id(servo_online).state || id(bolt)->position() < 0)
         return {};
-      const int pos = id(bolt)->position();
-      const int locked = (int) id(locked_position).state;
-      const int unlocked = (int) id(unlocked_position).state;
-      const int travel = abs(locked - unlocked);
-      const int tolerance = std::max(25, travel * 15 / 100);
+      const int32_t pos = id(bolt)->position();
+      const int32_t locked = (int32_t) id(locked_position).state;
+      const int32_t unlocked = (int32_t) id(unlocked_position).state;
+      const int32_t travel = abs(locked - unlocked);
+      const int32_t tolerance = std::max((int32_t) 25, travel * 15 / 100);
       if (abs(pos - locked) <= tolerance)
         return LOCK_STATE_LOCKED;
       if (abs(pos - unlocked) <= tolerance)
         return LOCK_STATE_UNLOCKED;
       return {};
     lock_action:
+      # Stop any hold in progress first: otherwise its delay would expire after
+      # this lock completes and drive the bolt straight back to unlocked.
+      - script.stop: open_door
       - script.execute:
           id: travel_to
-          target: !lambda 'return (int) id(locked_position).state;'
-          away_from: !lambda 'return (int) id(unlocked_position).state;'
+          target: !lambda 'return (int32_t) id(locked_position).state;'
+          away_from: !lambda 'return (int32_t) id(unlocked_position).state;'
       - script.wait: travel_to
     unlock_action:
+      - script.stop: open_door
       - script.execute:
           id: travel_to
-          target: !lambda 'return (int) id(unlocked_position).state;'
-          away_from: !lambda 'return (int) id(locked_position).state;'
+          target: !lambda 'return (int32_t) id(unlocked_position).state;'
+          away_from: !lambda 'return (int32_t) id(locked_position).state;'
       - script.wait: travel_to
+    # "Open" is more than "unlock" on a door with a passive outside handle: the
+    # latch has to be held back while somebody pushes. See the open_door script.
     open_action:
-      - lock.unlock: door_lock
+      - script.execute: open_door
+      - script.wait: open_door
+
+globals:
+  # One-off hold duration from the hold_open action. -1 means "use the saved
+  # Hold open seconds"; it is consumed and reset by open_door.
+  - id: hold_override
+    type: int
+    restore_value: false
+    initial_value: '-1'
+  # The duration the current hold is actually running for.
+  - id: hold_active
+    type: int
+    restore_value: false
+    initial_value: '0'
 
 script:
   # Drives the bolt to `target`, optionally pushing a little past it first so a
   # stiff euro cylinder is fully thrown, then settling exactly on target.
+  #
+  # Every move here is closed loop: start_move() commands the servo and the
+  # component then samples position and load every 25 ms until it either lands
+  # within tolerance, stalls, or runs out of time. Nothing waits on a guessed
+  # delay, and nothing assumes the servo did as it was told.
   - id: travel_to
     mode: restart
     parameters:
@@ -315,25 +568,162 @@ script:
       - lambda: |-
           const int push = (int) id(overshoot).state;
           const int speed = (int) id(move_speed).state;
+          int32_t first = target;
           if (push > 0) {
             const int dir = target >= away_from ? 1 : -1;
-            id(bolt)->move_to(target + dir * push, speed);
-          } else {
-            id(bolt)->move_to(target, speed);
+            first = target + dir * push;
           }
-      - delay: 1200ms
-      - lambda: 'id(bolt)->move_to(target, (int) id(move_speed).state);'
-      - delay: 600ms
+          id(bolt)->start_move(first, speed);
+      - wait_until:
+          condition:
+            lambda: 'return !id(bolt)->move_busy();'
+          timeout: 20s
       - if:
           condition:
-            lambda: 'return abs(id(bolt)->load()) >= (int) id(stall_load).state;'
+            lambda: 'return !id(bolt)->last_move_ok();'
           then:
-            - logger.log:
-                level: WARN
-                format: "DoorBot may be jammed: load %d"
-                args: ['id(bolt)->load()']
+            - script.execute:
+                id: report_failure
+                stage: "travel"
+      - if:
+          condition:
+            lambda: 'return ((int) id(overshoot).state) > 0;'
+          then:
+            # Settle back onto the exact target after the overshoot push. This
+            # runs even when the push itself stalled - a stiff cylinder jamming
+            # mid-overshoot is exactly the case where leaving the bolt parked
+            # past the lock point would be worst.
+            - lambda: 'id(bolt)->start_move(target, (int) id(move_speed).state);'
+            - wait_until:
+                condition:
+                  lambda: 'return !id(bolt)->move_busy();'
+                timeout: 20s
+      # Confirm the servo is genuinely holding where we left it, rather than
+      # having quietly dropped torque or tripped its overload protection.
+      - lambda: |-
+          if (!id(bolt)->verify_holding())
+            ESP_LOGW("doorbot", "Servo is not holding %d after the move", (int) target);
+
+  # Unlock, then keep turning past the unlocked point to pull the latch back and
+  # hold it there, so a door with no working outside handle can be pushed open.
+  # Set "Hold open seconds" to 0 to skip this entirely.
+  - id: open_door
+    mode: restart
+    then:
+      - script.execute:
+          id: travel_to
+          target: !lambda 'return (int32_t) id(unlocked_position).state;'
+          away_from: !lambda 'return (int32_t) id(locked_position).state;'
+      - script.wait: travel_to
+      - lambda: |-
+          // A negative override means "no override"; use the saved setting.
+          id(hold_active) = id(hold_override) >= 0 ? id(hold_override) : (int) id(hold_seconds).state;
+          id(hold_override) = -1;
+      - if:
+          condition:
+            lambda: 'return id(hold_active) > 0;'
+          then:
+            - lambda: |-
+                ESP_LOGI("doorbot", "Holding the latch at %d for %d s",
+                         (int) id(hold_position).state, id(hold_active));
+                id(bolt)->start_move((int32_t) id(hold_position).state, (int) id(move_speed).state);
+            - wait_until:
+                condition:
+                  lambda: 'return !id(bolt)->move_busy();'
+                timeout: 20s
+            - if:
+                condition:
+                  lambda: 'return !id(bolt)->last_move_ok();'
+                then:
+                  - script.execute:
+                      id: report_failure
+                      stage: "hold"
             - homeassistant.event:
-                event: esphome.doorbot_jammed
+                event: esphome.doorbot_holding_open
+            # Wait out the hold, then check the servo actually kept its grip.
+            # Overload protection cuts output to "Protective torque" after
+            # "Protection time", which is the usual reason a hold slips.
+            - delay: !lambda 'return ((uint32_t) id(hold_active)) * 1000;'
+            - if:
+                condition:
+                  lambda: 'return !id(bolt)->verify_holding();'
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "The latch slipped during the hold (position %d, load %d)"
+                      args: ['(int) id(bolt)->position()', 'id(bolt)->load()']
+                  - homeassistant.event:
+                      event: esphome.doorbot_hold_slipped
+            # Return to the plain unlocked position so the latch can drop.
+            - lambda: 'id(bolt)->start_move((int32_t) id(unlocked_position).state, (int) id(move_speed).state);'
+            - wait_until:
+                condition:
+                  lambda: 'return !id(bolt)->move_busy();'
+                timeout: 20s
+
+  # One place that turns a failed move into a log line and a Home Assistant
+  # event, so automations can react to a jam without polling.
+  - id: report_failure
+    parameters:
+      stage: string
+    then:
+      - logger.log:
+          level: WARN
+          format: "DoorBot %s failed: %s at %d (goal %d, load %d)"
+          args:
+            - 'stage.c_str()'
+            - 'esphome::sts3215::move_result_to_string(id(bolt)->move_result())'
+            - '(int) id(bolt)->position()'
+            - '(int) id(bolt)->goal()'
+            - 'id(bolt)->load()'
+      - homeassistant.event:
+          event: esphome.doorbot_jammed
+          data_template:
+            stage: !lambda 'return stage;'
+            result: !lambda 'return esphome::sts3215::move_result_to_string(id(bolt)->move_result());'
+            position: !lambda 'return to_string(id(bolt)->position());'
+            load: !lambda 'return to_string(id(bolt)->load());'
+
+  # Calibration helpers: creep until the mechanism stops us, then remember it.
+  - id: seek_and_capture_locked
+    mode: restart
+    then:
+      - lambda: |-
+          const int dir = ((int32_t) id(locked_position).state) >= ((int32_t) id(unlocked_position).state) ? 1 : -1;
+          id(bolt)->start_seek_stall(dir, (int) id(stall_load).state, 6000, 200);
+      - wait_until:
+          condition:
+            lambda: 'return !id(bolt)->move_busy();'
+          timeout: 60s
+      - if:
+          condition:
+            lambda: 'return id(bolt)->last_move_ok();'
+          then:
+            - lambda: 'id(locked_position).publish_state(id(bolt)->position());'
+          else:
+            - script.execute:
+                id: report_failure
+                stage: "locked end stop"
+
+  - id: seek_and_capture_unlocked
+    mode: restart
+    then:
+      - lambda: |-
+          const int dir = ((int32_t) id(unlocked_position).state) >= ((int32_t) id(locked_position).state) ? 1 : -1;
+          id(bolt)->start_seek_stall(dir, (int) id(stall_load).state, 6000, 200);
+      - wait_until:
+          condition:
+            lambda: 'return !id(bolt)->move_busy();'
+          timeout: 60s
+      - if:
+          condition:
+            lambda: 'return id(bolt)->last_move_ok();'
+          then:
+            - lambda: 'id(unlocked_position).publish_state(id(bolt)->position());'
+          else:
+            - script.execute:
+                id: report_failure
+                stage: "unlocked end stop"
 
 # ------------------------------------------- SwitchBot Keypad (encrypted)
 #

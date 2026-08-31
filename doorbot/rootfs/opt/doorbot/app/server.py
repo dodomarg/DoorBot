@@ -115,6 +115,10 @@ class DoorBotApp:
         r.add("POST", "/api/lock", lambda rq: self.controller.lock(actor="ui"))
         r.add("POST", "/api/unlock", lambda rq: self.controller.unlock(actor="ui"))
         r.add("POST", "/api/toggle", lambda rq: self.controller.toggle(actor="ui"))
+        # "Open" is unlock plus holding the latch back, for doors whose outside
+        # handle does not retract it. Falls back to a plain unlock when the
+        # hold duration is 0.
+        r.add("POST", "/api/open", lambda rq: self.controller.open(actor="ui"))
         r.add("POST", "/api/stop", self.api_stop)
 
         r.add("GET", "/api/calibration", lambda rq: self.db.get_calibration())
@@ -140,6 +144,7 @@ class DoorBotApp:
         r.add("POST", "/api/keypad/event", self.api_keypad_event)
 
         r.add("POST", "/api/dev/jam", self.api_dev_jam)
+        r.add("POST", "/api/dev/slip", self.api_dev_slip)
 
     # ---------------------------------------------------------- API methods
     def api_status(self, rq: Request) -> dict[str, Any]:
@@ -246,7 +251,9 @@ class DoorBotApp:
             if action == "toggle":
                 self.controller.toggle(actor=actor)
             elif action != "none":
-                self.controller.unlock(actor=actor)
+                # open() is a plain unlock unless a hold has been configured,
+                # so this is safe for ordinary doors too.
+                self.controller.open(actor=actor)
         except BackendError as exc:
             raise ApiError(str(exc), 409) from exc
 
@@ -344,6 +351,13 @@ class DoorBotApp:
             raise ApiError("Jam simulation is only available with the mock backend.")
         backend.jam_next_move = bool(rq.body.get("enabled", True))  # type: ignore[attr-defined]
         return {"jam_next_move": backend.jam_next_move}  # type: ignore[attr-defined]
+
+    def api_dev_slip(self, rq: Request) -> dict[str, Any]:
+        backend = self.controller.backend
+        if not hasattr(backend, "slip_next_hold"):
+            raise ApiError("Slip simulation is only available with the mock backend.")
+        backend.slip_next_hold = bool(rq.body.get("enabled", True))  # type: ignore[attr-defined]
+        return {"slip_next_hold": backend.slip_next_hold}  # type: ignore[attr-defined]
 
     # -------------------------------------------------------- rate limiting
     def _rate_limited(self, source: str) -> bool:

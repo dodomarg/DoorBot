@@ -23,6 +23,11 @@ DEFAULTS: dict[str, Any] = {
     "position_sensor_entity": "sensor.doorbot_position",
     "load_sensor_entity": "sensor.doorbot_load",
     "torque_switch_entity": "switch.doorbot_servo_torque",
+    # Closed-loop feedback published by the firmware. Without these the add-on
+    # cannot tell a finished move from one that never started.
+    "moving_binary_sensor_entity": "binary_sensor.doorbot_moving",
+    "holding_binary_sensor_entity": "binary_sensor.doorbot_holding_position",
+    "move_result_entity": "sensor.doorbot_last_move",
     # Home Assistant connection. Under the Supervisor these are injected.
     "hass_url": "http://supervisor/core",
     "hass_token": "",

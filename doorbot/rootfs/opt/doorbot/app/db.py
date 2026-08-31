@@ -53,6 +53,12 @@ DEFAULT_CALIBRATION: dict[str, Any] = {
     "unlocked_position": 1024,
     "overshoot": 0,
     "hold_ms": 400,
+    # Doors whose outside handle does not retract the latch need the key held
+    # past the unlocked point while somebody pushes. 0 seconds disables it.
+    "hold_position": 1024,
+    "hold_seconds": 0,
+    # Multi-turn travel, for cylinders that need more than one revolution.
+    "multi_turn": False,
     "speed": 800,
     "acceleration": 30,
     "torque_limit": 700,

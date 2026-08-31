@@ -56,6 +56,9 @@
         <div class="metric"><span>Voltage</span><strong id="mVolt">&mdash;</strong></div>
         <div class="metric"><span>Temp</span><strong id="mTemp">&mdash;</strong></div>
         <div class="metric"><span>Torque</span><strong id="mTorque">&mdash;</strong></div>
+        <div class="metric"><span>Holding</span><strong id="mHolding">&mdash;</strong></div>
+        <div class="metric"><span>Last move</span><strong id="mMove">&mdash;</strong></div>
+        <div class="metric" id="turnsMetric" hidden><span>Turns</span><strong id="mTurns">&mdash;</strong></div>
       </div>
     </div>
 
@@ -132,9 +135,9 @@
     <div class="card">
       <h2>Motion &amp; safety</h2>
       <form id="calForm" class="grid">
-        <label>Locked position <small>0&ndash;4095</small>
+        <label>Locked position <small id="lockedRange">0&ndash;4095</small>
           <input type="number" name="locked_position" min="0" max="4095" required></label>
-        <label>Unlocked position <small>0&ndash;4095</small>
+        <label>Unlocked position <small id="unlockedRange">0&ndash;4095</small>
           <input type="number" name="unlocked_position" min="0" max="4095" required></label>
         <label>Overshoot <small>extra push past the target</small>
           <input type="number" name="overshoot" min="0" max="500"></label>
@@ -160,8 +163,30 @@
         <label>Auto-lock after <small>seconds, 0 = off</small>
           <input type="number" name="auto_lock_seconds" min="0" max="3600"></label>
         <label class="check"><input type="checkbox" name="invert"> Invert direction</label>
+        <label class="check"><input type="checkbox" name="multi_turn"> Multi-turn
+          <small>for locks needing more than one full revolution</small></label>
         <div class="formactions">
           <button type="submit" class="btn primary">Save settings</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Hold open</h2>
+      <p class="muted">
+        Some doors have a passive outside handle: turning the key back leaves the
+        latch out, so the door still will not push open. Here DoorBot keeps
+        turning past the unlocked point and holds the latch back for a moment.
+        Leave the duration at 0 if your handle retracts the latch itself.
+      </p>
+      <form id="holdForm" class="grid">
+        <label>Hold position <small id="holdRange">where the latch is fully retracted</small>
+          <input type="number" name="hold_position" min="0" max="4095"></label>
+        <label>Hold for <small>seconds, 0 = off</small>
+          <input type="number" name="hold_seconds" min="0" max="60"></label>
+        <div class="formactions">
+          <button type="button" class="btn" id="btnTryHold">Try it</button>
+          <button type="submit" class="btn primary">Save hold settings</button>
         </div>
       </form>
     </div>

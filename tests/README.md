@@ -12,7 +12,8 @@ DOORBOT_DATA=/tmp/doorbot-data DOORBOT_PORT=8099 python3 -m app
 python3 tests/e2e.py
 ```
 
-38 checks covering the calibration wizard, lock/unlock, every PIN code type,
+59 checks covering the calibration wizard, lock/unlock, multi-turn travel,
+holding verification, hold-open and its fail-secure release, every PIN code type,
 one-time burning, per-source rate limiting, the SwitchBot keypad credential
 path (method/slot identity, raw method bytes, day and hour windows, duress,
 debouncing, lockdown mode), jam detection and stickiness, and the event log.

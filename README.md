@@ -92,6 +92,32 @@ Open the add-on → **Calibration**:
 Then tune speed, overshoot (an extra push past the target for stiff cylinders)
 and the jam threshold.
 
+Every move is checked against the servo's own position feedback, so a turn that
+falls short, jams or times out is reported as a failure rather than quietly
+counted as success.
+
+#### Locks needing more than one turn
+
+Tick **Multi-turn** before capturing the positions. The travel range opens from
+one revolution (0–4095) to ±30719 steps, so a euro cylinder that needs two or
+three turns works without gearing.
+
+The servo does not remember its revolution count across a power cut — that is a
+hardware limitation, not a bug. DoorBot re-homes after a reset.
+
+#### Doors with a passive outside handle
+
+If the outside handle does not retract the latch, unlocking is not enough: the
+latch stays out and the door will not push open. Use the **Hold open** card —
+DoorBot turns past the unlocked point to a hold position, keeps the latch back
+for the number of seconds you set, then returns.
+
+Set **Hold for** to 0 if your handle retracts the latch itself.
+
+If the latch slips while being held, it is almost always the servo's own
+overload protection cutting output. Raise **Protective torque** on the ESP32
+device page; `docs/sts3215.md` explains the mechanism.
+
 The calibration is also stored on the ESP32 itself in `restore_value` number
 entities, so the lock keeps working if the add-on or Home Assistant is down.
 

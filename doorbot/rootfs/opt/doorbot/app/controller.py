@@ -23,6 +23,10 @@ from .hass import HassClient, HassError
 
 # Servo raw units. The STS3215 is a 12-bit encoder: 0..4095 over 360 degrees.
 RESOLUTION = 4096
+# With both angle limits set to 0 the servo accepts multi-turn goals over this
+# range instead of a single revolution (official ST3215 register map, reg 0x2A).
+MULTITURN_MIN = -30719
+MULTITURN_MAX = 30719
 STATE_LOCKED = "locked"
 STATE_UNLOCKED = "unlocked"
 STATE_LOCKING = "locking"
@@ -33,10 +37,20 @@ STATE_UNKNOWN = "unknown"
 # The locked and unlocked points must be at least this far apart (raw steps,
 # ~5 degrees) before the calibration is considered usable.
 MIN_TRAVEL = 60
+# How far off the commanded position the servo may settle and still count as
+# having arrived. Matches the firmware's `tolerance` option.
+MOVE_TOLERANCE = 25
 
 
 def raw_to_degrees(raw: int) -> float:
     return round(raw * 360.0 / RESOLUTION, 1)
+
+
+def travel_limits(multi_turn: bool) -> tuple[int, int]:
+    """Position bounds for the current travel mode."""
+    if multi_turn:
+        return MULTITURN_MIN, MULTITURN_MAX
+    return 0, RESOLUTION - 1
 
 
 class BackendError(RuntimeError):
@@ -58,6 +72,10 @@ class BaseBackend:
     def stop(self) -> None:
         raise NotImplementedError
 
+    def set_multi_turn(self, enabled: bool) -> None:
+        """Widen or narrow the travel range. Mock backends model it locally."""
+        return None
+
 
 class MockBackend(BaseBackend):
     """Simulated STS3215 so the add-on is fully testable without hardware."""
@@ -78,12 +96,36 @@ class MockBackend(BaseBackend):
         # so "drive until it stalls" behaves like a real deadbolt.
         self._stop_low = 0.0
         self._stop_high = float(RESOLUTION - 1)
+        self._multi_turn = bool(calibration.get("multi_turn"))
+        # Mirrors the firmware's MoveResult so the UI can show the same words
+        # whether it is talking to a simulation or to a real servo.
+        self._move_result = "idle"
         self.jam_next_move = False
         self._jammed = False
+        # Simulates the servo's overload protection cutting output during a
+        # hold, which is the realistic failure mode of hold-open.
+        self._slip_armed_move = -1
+        self._slipped = False
+        self._on_goal_since = 0.0
+        self._move_seq = 0
+
+    @property
+    def slip_next_hold(self) -> bool:
+        return self._slip_armed_move >= 0
+
+    @slip_next_hold.setter
+    def slip_next_hold(self, enabled: bool) -> None:
+        # Armed against the *next* move, so arming it while the servo is
+        # already holding does not consume it on the hold in progress.
+        self._slip_armed_move = self._move_seq if enabled else -1
 
     def set_hard_stops(self, low: float, high: float) -> None:
         with self._lock:
             self._stop_low, self._stop_high = min(low, high), max(low, high)
+
+    def set_multi_turn(self, enabled: bool) -> None:
+        with self._lock:
+            self._multi_turn = bool(enabled)
 
     # ------------------------------------------------------------- internals
     def _tick(self) -> None:
@@ -116,12 +158,31 @@ class MockBackend(BaseBackend):
             if self.jam_next_move:
                 self._load = 980.0
                 self._jammed = True
+                self._move_result = "jammed"
                 self._goal = self._position
         else:
             self._load *= 0.6
+            if self._move_result == "moving":
+                self._move_result = "arrived"
 
         self._temperature = min(60.0, 30.0 + self._load / 60.0)
         self._voltage = 12.2 - self._load / 4000.0
+
+        # Overload protection only trips on a *sustained* hold, so a move that
+        # merely passes through a position is unaffected - same as the real
+        # servo, where Protection time has to elapse first.
+        if self._torque and abs(self._goal - self._position) <= 25.0:
+            if self._on_goal_since == 0.0:
+                self._on_goal_since = now
+            elif (
+                self._slip_armed_move >= 0
+                and self._move_seq > self._slip_armed_move
+                and now - self._on_goal_since >= 0.5
+            ):
+                self._slip_armed_move = -1
+                self._slipped = True
+        else:
+            self._on_goal_since = 0.0
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -137,6 +198,15 @@ class MockBackend(BaseBackend):
                 "torque": self._torque,
                 "moving": abs(self._goal - self._position) > 1.0,
                 "jammed": self._jammed,
+                # Holding means torque is on AND we are actually sitting on the
+                # goal - the same test the firmware performs over the bus.
+                "holding": not self._slipped
+                and self._torque
+                and abs(self._goal - self._position) <= 25.0
+                and not self._jammed,
+                "move_result": self._move_result,
+                "multi_turn": self._multi_turn,
+                "turns": round(self._position / RESOLUTION, 2),
             }
 
     def move_to(self, position: int, speed: int | None = None) -> None:
@@ -145,8 +215,13 @@ class MockBackend(BaseBackend):
             if speed:
                 self._speed = float(speed)
             self._torque = True
-            self._goal = float(max(0, min(RESOLUTION - 1, int(position))))
+            low, high = travel_limits(self._multi_turn)
+            self._goal = float(max(low, min(high, int(position))))
             self._jammed = False
+            self._slipped = False
+            self._on_goal_since = 0.0
+            self._move_seq += 1
+            self._move_result = "moving"
 
     def set_torque(self, enabled: bool) -> None:
         with self._lock:
@@ -154,6 +229,7 @@ class MockBackend(BaseBackend):
             self._torque = bool(enabled)
             if not enabled:
                 self._goal = self._position
+                self._move_result = "idle"
 
     def stop(self) -> None:
         with self._lock:
@@ -206,9 +282,21 @@ class EsphomeBackend(BaseBackend):
             "voltage": self._num("sensor.doorbot_voltage") or 0.0,
             "temperature": self._num("sensor.doorbot_temperature") or 0.0,
             "torque": bool(torque_state and torque_state.get("state") == "on"),
-            "moving": False,
-            "jammed": False,
+            "moving": self._is_on(self.options.get("moving_binary_sensor_entity", "")),
+            # These come straight from the firmware, which verifies them against
+            # the servo rather than assuming the last command worked.
+            "holding": self._is_on(self.options.get("holding_binary_sensor_entity", "")),
+            "move_result": self._text(self.options.get("move_result_entity", "")) or "idle",
+            "jammed": self._text(self.options.get("move_result_entity", "")) == "jammed",
         }
+
+    def _is_on(self, entity: str) -> bool:
+        state = self.hass.state(entity) if entity else None
+        return bool(state and state.get("state") == "on")
+
+    def _text(self, entity: str) -> str:
+        state = self.hass.state(entity) if entity else None
+        return str(state.get("state")) if state else ""
 
     def move_to(self, position: int, speed: int | None = None) -> None:
         entity = self.options.get("position_number_entity")
@@ -230,6 +318,16 @@ class EsphomeBackend(BaseBackend):
         status = self.status()
         self.move_to(status["position"])
 
+    def set_multi_turn(self, enabled: bool) -> None:
+        # The firmware owns the servo's EEPROM; ask it to re-apply the range.
+        self.hass.call_service(
+            "esphome",
+            "doorbot_configure_servo",
+            multi_turn=bool(enabled),
+            torque_limit=int(self.options.get("torque_limit", 700)),
+            max_torque=int(self.options.get("max_torque", 1000)),
+        )
+
 
 class LockController:
     """High-level lock behaviour built on top of a backend."""
@@ -241,31 +339,66 @@ class LockController:
         self._lock = threading.RLock()
         self._state = STATE_UNKNOWN
         self._auto_lock_timer: threading.Timer | None = None
+        # Bumped by every command that supersedes an in-flight hold-open.
+        self._hold_generation = 0
         self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
         self._sync_hard_stops()
         self._state = self._infer_state()
 
     # ------------------------------------------------------------- plumbing
     def _sync_hard_stops(self) -> None:
+        cal = self.db.get_calibration()
+        # The firmware owns the servo's real travel range, so tell it about
+        # multi-turn regardless of backend; the simulated stops below are only
+        # meaningful for the mock.
+        self.backend.set_multi_turn(bool(cal.get("multi_turn")))
         if isinstance(self.backend, MockBackend):
-            cal = self.db.get_calibration()
+            low, high = travel_limits(bool(cal.get("multi_turn")))
             if not cal.get("calibrated"):
                 # Nothing learned yet - let the simulated bolt travel freely so
                 # the calibration wizard can reach any position.
-                self.backend.set_hard_stops(0, RESOLUTION - 1)
+                self.backend.set_hard_stops(low, high)
                 return
             lo = min(cal["locked_position"], cal["unlocked_position"])
             hi = max(cal["locked_position"], cal["unlocked_position"])
             # Generous margin: a real deadbolt has a little slack past each end,
             # and this must never box in a later re-calibration.
             margin = max(150, int(abs(hi - lo) * 0.25))
-            self.backend.set_hard_stops(lo - margin, hi + margin)
+            # A hold-open point sits past the unlocked end, so the simulated
+            # stops have to leave room for it or the hold would look like a jam.
+            hold = int(cal.get("hold_position") or 0)
+            if int(cal.get("hold_seconds") or 0) > 0:
+                lo, hi = min(lo, hold), max(hi, hold)
+            self.backend.set_hard_stops(max(low, lo - margin), min(high, hi + margin))
+
+    # move_result values that mean the firmware has finished with the move.
+    TERMINAL_RESULTS = frozenset(
+        {"arrived", "jammed", "timeout", "stalled", "aborted", "offline"}
+    )
 
     def _settle(self, timeout: float = 12.0) -> dict[str, Any]:
-        """Block until the servo stops moving (or the timeout expires)."""
+        """Block until the servo finishes the move (or the timeout expires)."""
         deadline = time.monotonic() + timeout
+        # A command that has just been sent has not reached the servo yet, so
+        # "not moving" at this instant means "not started", not "finished".
+        # Waiting for a terminal move_result avoids that race; the moving flag
+        # is only the fallback for backends that do not report one.
+        started = False
         servo = self.backend.status()
-        while servo.get("moving") and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            result = servo.get("move_result", "")
+            if result:
+                if result == "moving":
+                    started = True
+                elif started or result in self.TERMINAL_RESULTS:
+                    break
+            elif servo.get("moving"):
+                started = True
+            elif started:
+                break
+            elif time.monotonic() > deadline - timeout + 0.5:
+                # No feedback at all after half a second: nothing is coming.
+                break
             time.sleep(0.02)
             servo = self.backend.status()
         return servo
@@ -316,14 +449,30 @@ class LockController:
 
     # ------------------------------------------------------------- movement
     def _drive(self, position: int, speed: int | None, actor: str) -> dict[str, Any]:
-        """Move to a position, wait for it to settle, and raise if it jams."""
+        """Move to a position, wait for it to settle, and verify it got there."""
         self.backend.move_to(position, speed)
         servo = self._settle()
-        if servo.get("jammed"):
+        result = servo.get("move_result", "")
+        if servo.get("jammed") or result in ("jammed", "timeout"):
             self._state = STATE_JAMMED
-            self.db.log("jammed", "The lock jammed while moving", actor=actor)
-            self._emit("jammed", {"actor": actor})
-            raise BackendError("The lock jammed - check the mechanism.")
+            reason = "jammed" if result != "timeout" else "timed out"
+            self.db.log("jammed", f"The lock {reason} while moving", actor=actor)
+            self._emit("jammed", {"actor": actor, "result": result})
+            raise BackendError(f"The lock {reason} - check the mechanism.")
+        # The move claims to be done; confirm the servo is really sitting there
+        # rather than trusting that the command was obeyed.
+        drift = abs(int(servo.get("position", 0)) - int(position))
+        if drift > MOVE_TOLERANCE:
+            self.db.log(
+                "jammed",
+                f"Stopped {drift} steps short of {position}",
+                actor=actor,
+                position=servo.get("position"),
+            )
+            self._emit("jammed", {"actor": actor, "result": "short"})
+            raise BackendError(
+                f"The lock stopped {drift} steps short of where it was sent."
+            )
         return servo
 
     def _travel(self, target_key: str, end_state: str, actor: str) -> dict[str, Any]:
@@ -345,7 +494,8 @@ class LockController:
                 else cal["locked_position"]
             )
             direction = 1 if target >= other else -1
-            push = max(0, min(RESOLUTION - 1, target + direction * overshoot))
+            low, high = travel_limits(bool(cal.get("multi_turn")))
+            push = max(low, min(high, target + direction * overshoot))
             self._drive(push, speed, actor)
             time.sleep(min(2.0, (cal.get("hold_ms") or 0) / 1000.0))
 
@@ -359,12 +509,91 @@ class LockController:
 
     def lock(self, actor: str = "ui") -> dict[str, Any]:
         with self._lock:
+            self._hold_generation += 1
             self._cancel_auto_lock()
             return self._travel("locked_position", STATE_LOCKED, actor)
 
     def unlock(self, actor: str = "ui") -> dict[str, Any]:
         with self._lock:
+            self._hold_generation += 1
             return self._travel("unlocked_position", STATE_UNLOCKED, actor)
+
+    def open(self, actor: str = "ui") -> dict[str, Any]:
+        """Unlock, then hold the latch retracted so the door can be pushed.
+
+        Needed on doors whose outside handle is passive: turning the key back to
+        "unlocked" leaves the latch out, so the door still will not open. The
+        servo has to keep turning past that point and stay there.
+        """
+        with self._lock:
+            self.unlock(actor=actor)
+            cal = self.db.get_calibration()
+            seconds = int(cal.get("hold_seconds") or 0)
+            if seconds <= 0:
+                return self.status()
+
+            # unlock() already armed auto-lock, but the grace period should
+            # start when the latch is released, not when the hold begins.
+            self._cancel_auto_lock()
+
+            hold_at = int(cal.get("hold_position") or cal["unlocked_position"])
+            unlocked_at = int(cal["unlocked_position"])
+            speed = cal.get("speed")
+            self._hold_generation += 1
+            generation = self._hold_generation
+            try:
+                self._drive(hold_at, speed, actor)
+            except BackendError:
+                # Never leave the latch part-way to the hold point.
+                self._release_latch(unlocked_at, speed, actor)
+                raise
+            self.db.log(
+                "hold_open",
+                f"Holding the latch at {hold_at} for {seconds}s",
+                actor=actor,
+                position=hold_at,
+                seconds=seconds,
+            )
+            self._emit("hold_open", {"actor": actor, "seconds": seconds})
+
+        # Deliberately outside the lock: a hold can last a minute, and blocking
+        # every status poll and the lock button for that long would be worse
+        # than useless - you could not cancel the hold you are stuck in.
+        slipped = False
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            if self._hold_generation != generation:
+                return self.status()  # a newer command took over
+            if not self.backend.status().get("holding", True):
+                slipped = True
+                break
+
+        with self._lock:
+            if self._hold_generation != generation:
+                return self.status()
+            if slipped:
+                # Usually the servo's own overload protection cutting output
+                # after Protection time; the door may not have opened.
+                self.db.log(
+                    "hold_slipped", "The latch slipped while being held", actor=actor
+                )
+                self._emit("hold_slipped", {"actor": actor})
+            self._release_latch(unlocked_at, speed, actor)
+            return self.status()
+
+    def _release_latch(self, unlocked_at: int, speed: int | None, actor: str) -> None:
+        """Return from the hold point. A lock must never fail latch-retracted."""
+        try:
+            self._drive(unlocked_at, speed, actor)
+            self._state = STATE_UNLOCKED
+        except BackendError:
+            self.db.log(
+                "jammed",
+                "Could not release the latch after holding it open",
+                actor=actor,
+            )
+        self._schedule_auto_lock(self._state)
 
     def toggle(self, actor: str = "ui") -> dict[str, Any]:
         return self.lock(actor) if self._state != STATE_LOCKED else self.unlock(actor)
@@ -406,7 +635,10 @@ class LockController:
 
     def goto(self, position: int) -> dict[str, Any]:
         with self._lock:
-            self.backend.move_to(int(position), self.db.get_calibration().get("speed"))
+            cal = self.db.get_calibration()
+            low, high = travel_limits(bool(cal.get("multi_turn")))
+            target = max(low, min(high, int(position)))
+            self.backend.move_to(target, cal.get("speed"))
             self._settle(8.0)
             return self.status()
 
@@ -451,6 +683,9 @@ class LockController:
                     "unlocked_position",
                     "overshoot",
                     "hold_ms",
+                    "hold_position",
+                    "hold_seconds",
+                    "multi_turn",
                     "speed",
                     "acceleration",
                     "torque_limit",
@@ -467,6 +702,8 @@ class LockController:
                 "unlocked_position",
                 "overshoot",
                 "hold_ms",
+                "hold_position",
+                "hold_seconds",
                 "speed",
                 "acceleration",
                 "torque_limit",
@@ -477,8 +714,9 @@ class LockController:
             ):
                 if key in allowed:
                     allowed[key] = int(allowed[key])
-            if "invert" in allowed:
-                allowed["invert"] = bool(allowed["invert"])
+            for key in ("invert", "multi_turn"):
+                if key in allowed:
+                    allowed[key] = bool(allowed[key])
             cal = self.db.save_calibration(allowed)
             # Editing the end points by hand must re-check that they are usable.
             if "locked_position" in allowed or "unlocked_position" in allowed:

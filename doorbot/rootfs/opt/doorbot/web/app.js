@@ -45,6 +45,28 @@ async function run(fn, okMessage) {
   }
 }
 
+const MOVE_LABELS = {
+  idle: 'Idle', moving: 'Moving…', arrived: 'Arrived',
+  jammed: 'Jammed', timeout: 'Timed out', stalled: 'Found the end stop',
+  aborted: 'Stopped', offline: 'No reply',
+};
+
+// In multi-turn mode a goal is no longer confined to one 0..4095 revolution,
+// so the position inputs have to open up to match the firmware.
+function applyTravelRange(multiTurn) {
+  const lo = multiTurn ? -30719 : 0;
+  const hi = multiTurn ? 30719 : 4095;
+  const label = `${lo.toLocaleString()}&ndash;${hi.toLocaleString()}`;
+  ['locked_position', 'unlocked_position', 'hold_position'].forEach((name) => {
+    const field = document.getElementsByName(name)[0];
+    if (!field) return;
+    field.min = lo;
+    field.max = hi;
+  });
+  const lockedRange = $('#lockedRange'); if (lockedRange) lockedRange.innerHTML = label;
+  const unlockedRange = $('#unlockedRange'); if (unlockedRange) unlockedRange.innerHTML = label;
+}
+
 /* --------------------------------------------------------------- rendering */
 function renderStatus(status) {
   if (!status) return;
@@ -62,6 +84,14 @@ function renderStatus(status) {
   $('#mVolt').textContent = servo.voltage != null ? `${servo.voltage} V` : '—';
   $('#mTemp').textContent = servo.temperature != null ? `${servo.temperature} °C` : '—';
   $('#mTorque').textContent = servo.torque ? 'On' : 'Released';
+  // "Torque on" only means the command was sent; "holding" is the servo
+  // actually confirming it is powered and sitting on target.
+  $('#mHolding').textContent = servo.torque ? (servo.holding ? 'Yes' : 'No') : '—';
+  $('#mMove').textContent = MOVE_LABELS[servo.move_result] || '—';
+  $('#turnsMetric').hidden = !cal.multi_turn;
+  $('#mTurns').textContent = servo.turns != null ? servo.turns.toFixed(2) : '—';
+
+  applyTravelRange(!!cal.multi_turn);
 
   // Dial: map the position between the two calibrated end points.
   const lo = Math.min(cal.locked_position, cal.unlocked_position);
@@ -86,6 +116,7 @@ function renderStatus(status) {
   $('#pillUnlocked').classList.toggle('set', !!status.calibrated);
 
   if (!$('#calForm').dataset.dirty) fillForm($('#calForm'), cal);
+  if (!$('#holdForm').dataset.dirty) fillForm($('#holdForm'), cal);
   $('#devCard').hidden = status.backend !== 'mock';
 
   if (status.keypad) renderKeypad(status.keypad);
@@ -361,6 +392,20 @@ function bindEvents() {
       renderStatus(status);
     }, 'Settings saved');
   };
+
+  const holdForm = $('#holdForm');
+  holdForm.oninput = () => { holdForm.dataset.dirty = '1'; };
+  holdForm.onsubmit = (ev) => {
+    ev.preventDefault();
+    run(async () => {
+      const status = await api('calibration', { method: 'POST', body: readForm(holdForm) });
+      delete holdForm.dataset.dirty;
+      renderStatus(status);
+    }, 'Hold settings saved');
+  };
+  $('#btnTryHold').onclick = () =>
+    run(async () => renderStatus(await api('open', { method: 'POST' })),
+      'Unlocked and held the latch');
 
   $('#jamToggle').onchange = (ev) =>
     run(() => api('dev/jam', { method: 'POST', body: { enabled: ev.target.checked } }));

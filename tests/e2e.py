@@ -1,10 +1,11 @@
-import json, urllib.request, time, sys
+import json, urllib.request, time, sys, threading
 
 RUN = str(int(time.time()))            # per-run source ids keep the rate limiter clean
 SRC, ATTACKER = "test-" + RUN, "attacker-" + RUN
 B="http://localhost:8099/api/"
 POSTS = ("lock","unlock","stop","verify","dev/jam","keypad/event","keypad/settings",
          "keypad/credentials",
+         "open","dev/slip",
          "calibration","calibration/torque","calibration/goto","calibration/jog",
          "calibration/capture","calibration/reset","codes")
 def call(p, body=None, method=None):
@@ -25,6 +26,7 @@ for _c in call("keypad", method="GET").get("credentials", []):
 call("keypad/settings", {"enabled": True, "action": "unlock",
                          "min_interval_seconds": 0, "known_credentials_only": False})
 call("calibration/reset")
+call("dev/jam", {"enabled": False})   # in case an earlier run aborted mid-jam
 
 # --- calibration wizard ---
 call("calibration/torque", {"enabled": False})
@@ -165,7 +167,106 @@ e=call("keypad/event", {"method":"pin","slot":3})
 ok("disabled keypad refuses", e["result"]=="rejected")
 call("keypad/settings", {"enabled":True,"action":"unlock","min_interval_seconds":0})
 
+# --- multi-turn travel ---
+# A euro cylinder often needs more than one full revolution. In multi-turn mode
+# the servo accepts goals outside a single 0..4095 turn.
+call("calibration/reset")   # an uncalibrated lock may travel its whole range
+s=call("calibration", {"multi_turn": True})
+ok("multi-turn enabled", s["calibration"]["multi_turn"] is True)
+s=call("calibration/goto", {"position": 6000}); time.sleep(0.6)
+s=call("status", method="GET")
+ok("travelled past one full turn", s["servo"]["position"] > 4095)
+ok("turns reported", s["servo"]["turns"] > 1.0)
+
+s=call("calibration/goto", {"position": -2500}); time.sleep(0.9)
+s=call("status", method="GET")
+ok("negative multi-turn position", s["servo"]["position"] < 0)
+
+# Single-turn mode must clamp back into one revolution.
+call("calibration", {"multi_turn": False})
+call("calibration/goto", {"position": 9000}); time.sleep(0.8)
+s=call("status", method="GET")
+ok("single-turn clamps to one revolution", s["servo"]["position"] <= 4095)
+
+# --- holding verification ---
+call("calibration", {"multi_turn": False})
+call("calibration/torque", {"enabled": True})
+call("calibration/goto", {"position": 2000}); time.sleep(0.5)
+s=call("status", method="GET")
+ok("servo reports holding", s["servo"]["holding"] is True)
+ok("move result reported", s["servo"]["move_result"] == "arrived")
+s=call("calibration/torque", {"enabled": False}); time.sleep(0.05)
+s=call("status", method="GET")
+ok("not holding once torque is released", s["servo"]["holding"] is False)
+call("calibration/torque", {"enabled": True})
+
+# --- hold open (passive outside handle) ---
+# Re-establish a known calibration, then park a hold point past the unlocked end.
+call("calibration/goto", {"position": 2400}); time.sleep(0.4)
+call("calibration/capture", {"which":"locked"})
+call("calibration/goto", {"position": 1500}); time.sleep(0.4)
+call("calibration/capture", {"which":"unlocked"})
+s=call("calibration", {"hold_position": 1100, "hold_seconds": 1, "overshoot": 0})
+ok("hold settings saved", s["calibration"]["hold_seconds"]==1)
+
+t0=time.time()
+s=call("open")
+elapsed=time.time()-t0
+ok("open held the latch then returned", elapsed >= 1.0)
+ok("ended unlocked", s["state"]=="unlocked")
+ok("back at the unlocked point",
+   abs(s["servo"]["position"] - s["calibration"]["unlocked_position"]) <= 25)
+evts=[e["kind"] for e in call("events", method="GET").get("events", [])]
+ok("hold logged", "hold_open" in evts)
+
+# A slip during the hold must be reported, and the latch must still be released.
+call("lock"); time.sleep(0.6)
+call("calibration", {"hold_seconds": 2})
+call("dev/slip", {"enabled": True})
+s=call("open")
+ok("slip reported", "hold_slipped" in
+   [e["kind"] for e in call("events", method="GET").get("events", [])])
+ok("latch released after a slip",
+   abs(s["servo"]["position"] - s["calibration"]["unlocked_position"]) <= 25)
+ok("still ends unlocked after a slip", s["state"]=="unlocked")
+
+# Fail secure: if the hold move itself jams, the latch must not stay retracted.
+call("lock"); time.sleep(0.6)
+call("dev/jam", {"enabled": True})
+j=call("open")
+call("dev/jam", {"enabled": False})
+ok("a jam during open is reported", j.get("HTTP")==409)
+time.sleep(0.6)
+s=call("status", method="GET")
+ok("not left at the hold position",
+   abs(s["servo"]["position"] - s["calibration"]["hold_position"]) > 25)
+
+# The status API must stay responsive while a hold is running, and a lock
+# issued mid-hold must win rather than being undone when the hold expires.
+call("calibration", {"hold_seconds": 3})
+call("lock"); time.sleep(0.6)
+_res={}
+_t=threading.Thread(target=lambda: _res.update(open=call("open")))
+_t.start(); time.sleep(1.2)
+t0=time.time(); call("status", method="GET"); poll=time.time()-t0
+ok("status stays responsive during a hold", poll < 0.5)
+call("lock"); _t.join(); time.sleep(0.8)
+s=call("status", method="GET")
+ok("lock during a hold wins", s["state"]=="locked")
+call("calibration", {"hold_seconds": 0})
+
+# With no hold configured, open() is just an unlock and returns promptly.
+call("calibration", {"hold_seconds": 0})
+call("lock"); time.sleep(0.4)
+t0=time.time(); baseline=call("unlock"); plain=time.time()-t0
+call("lock"); time.sleep(0.4)
+t0=time.time(); s=call("open"); elapsed=time.time()-t0
+# Same work as an unlock: no extra hold, no second trip back.
+ok("open without hold is a plain unlock",
+   s["state"]=="unlocked" and baseline["state"]=="unlocked" and elapsed < plain + 0.5)
+
 # --- jam handling ---
+call("lock"); time.sleep(0.6)         # a jam only shows up on a move that has work to do
 call("dev/jam", {"enabled":True})
 j=call("unlock")
 ok("jam detected", j.get("HTTP")==409)
