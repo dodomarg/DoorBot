@@ -73,3 +73,50 @@ If the lock lives on an isolated IoT VLAN:
   pairing, then remove it.
 - Deny everything else, including any lock-initiated traffic to your trusted
   networks. Nothing in DoorBot needs it.
+
+## Provisioning Wi-Fi over USB
+
+Wi-Fi credentials reach the device two ways, and it is worth knowing which one
+is in force.
+
+**Compiled in.** `wifi.ssid`/`wifi.password` come from `esphome/secrets.yaml`
+via `!secret`, so they are baked into the image at build time. A factory flash
+erases NVS, so the compiled credentials are what the device falls back to. If
+`secrets.yaml` still holds the `secrets.yaml.example` placeholders, the device
+will boot and hunt for a network that does not exist:
+
+```
+[W][wifi:1542]: No matching network found
+[I][wifi:1128]: Connecting to 'TestNet' (any) ...
+[W][wifi_esp32:865]: Disconnected reason='Probe Request Unsuccessful'
+```
+
+That message means the credentials were never set, not that they were lost.
+
+**Provisioned at runtime.** `improv_serial:` accepts credentials over the USB
+cable and stores them in NVS, with no reflash. Either use the *Configure Wi-Fi*
+button at <https://web.esphome.io>, or run the bundled CLI tool:
+
+```bash
+tools/improv_provision.py --port /dev/ttyACM0 --ssid 'MyNetwork' --password 'secret'
+```
+
+Runtime provisioning survives OTA updates but **not** a factory flash over USB.
+Fix `secrets.yaml` as well, or the next cable flash reverts to the placeholder.
+
+The ESP32-S3 has no 5 GHz radio, so the SSID must be reachable on 2.4 GHz.
+
+## Finding the device after it connects
+
+The lock is deliberately not discoverable from a trusted network when the two
+are on separate VLANs — mDNS is link-local multicast to `224.0.0.251` and does
+not cross a router, so `doorbot.local` will not resolve from another subnet.
+
+Scan for the API port instead, then give the lock a DHCP reservation:
+
+```bash
+nmap -Pn -p 6053 --open 10.0.20.0/24
+```
+
+Once you have the address, set `use_address:` in `doorbot.yaml` (or add the
+ESPHome integration by IP) so Home Assistant does not depend on mDNS at all.
