@@ -124,6 +124,13 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
+  # mDNS is link-local multicast to 224.0.0.251 and does not cross a router, so
+  # `doorbot.local` will not resolve when the lock sits on an isolated IoT VLAN
+  # and Home Assistant does not. Addressing the device directly keeps OTA and
+  # the API working across subnets. Pair this with a DHCP reservation, or the
+  # address will eventually move out from under it.
+  use_address: !secret doorbot_address
+
 # There is deliberately no fallback `ap:` here, and no captive_portal.
 #
 # An AP would be genuinely useless on this device. captive_portal cannot be
@@ -134,9 +141,15 @@ wifi:
 # the setup wizard signs in against https://account.api.switchbot.net, and a
 # client parked on the ESP's own AP has no route to the internet.
 #
-# improv_serial is the recovery path instead. Hold the board's BOOT button
-# while plugging in, open https://web.esphome.io, and set new Wi-Fi
-# credentials over the same USB cable used for flashing -- no reflash needed.
+# improv_serial is the recovery path instead. Plug the board in normally (do
+# not hold BOOT -- that enters the ROM bootloader, where the firmware, and so
+# improv, is not running), then either use "Configure Wi-Fi" at
+# https://web.esphome.io or run tools/improv_provision.py. Either way the
+# credentials go into NVS over the USB cable, with no reflash.
+#
+# Note those credentials do not survive a factory flash, which erases NVS. Keep
+# secrets.yaml correct as well, or the next cable flash reverts to whatever was
+# compiled in.
 improv_serial:
 
 # The setup wizard's HTTPS call to SwitchBot needs a valid system clock.
