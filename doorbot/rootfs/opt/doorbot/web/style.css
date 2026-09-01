@@ -305,3 +305,40 @@ legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 6px;
   .hero-actions { width: 100%; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+/* --------------------------------------------------------------- banners */
+/* Loud, persistent warnings for the two states that silently invalidate
+   everything else on screen: a servo that is not answering, and simulator
+   mode. Both used to be invisible, so a move against nothing looked like a
+   successful lock. */
+.banner {
+  display: flex;
+  gap: .75rem;
+  align-items: flex-start;
+  margin: .75rem 1rem 0;
+  padding: .75rem .9rem;
+  border-radius: 10px;
+  border: 1px solid;
+  font-size: .88rem;
+  line-height: 1.35;
+}
+/* Explicit, because the flex rule above would otherwise defeat [hidden]. */
+.banner[hidden] { display: none; }
+.banner div { display: flex; flex-direction: column; gap: .15rem; }
+.banner strong { font-weight: 600; }
+.banner code {
+  background: rgba(0, 0, 0, .12);
+  padding: .05rem .3rem;
+  border-radius: 4px;
+}
+.banner-icon { font-size: 1.05rem; line-height: 1.35; }
+.banner-bad {
+  background: rgba(208, 69, 59, .12);
+  border-color: rgba(208, 69, 59, .45);
+  color: var(--bad);
+}
+.banner-warn {
+  background: rgba(217, 131, 36, .12);
+  border-color: rgba(217, 131, 36, .45);
+  color: var(--warn);
+}

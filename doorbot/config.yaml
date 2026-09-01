@@ -1,5 +1,5 @@
 name: DoorBot
-version: "0.2.1"
+version: "0.2.2"
 slug: doorbot
 description: Calibrate a DIY servo deadbolt and manage its PIN codes, from inside Home Assistant.
 url: https://github.com/dodomarg/DoorBot
@@ -27,6 +27,9 @@ options:
   moving_binary_sensor_entity: binary_sensor.doorbot_moving
   holding_binary_sensor_entity: binary_sensor.doorbot_holding_position
   move_result_entity: sensor.doorbot_last_move
+  online_binary_sensor_entity: binary_sensor.doorbot_servo_online
+  voltage_sensor_entity: sensor.doorbot_servo_voltage
+  temperature_sensor_entity: sensor.doorbot_servo_temperature
   auto_lock_seconds: 0
   max_failed_attempts: 5
   lockout_seconds: 300
@@ -41,6 +44,9 @@ schema:
   moving_binary_sensor_entity: str?
   holding_binary_sensor_entity: str?
   move_result_entity: str?
+  online_binary_sensor_entity: str?
+  voltage_sensor_entity: str?
+  temperature_sensor_entity: str?
   auto_lock_seconds: int(0,3600)
   max_failed_attempts: int(0,50)
   lockout_seconds: int(0,86400)

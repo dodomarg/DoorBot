@@ -28,6 +28,9 @@ torque_switch_entity: switch.doorbot_servo_torque
 moving_binary_sensor_entity: binary_sensor.doorbot_moving
 holding_binary_sensor_entity: binary_sensor.doorbot_holding_position
 move_result_entity: sensor.doorbot_last_move
+online_binary_sensor_entity: binary_sensor.doorbot_servo_online
+voltage_sensor_entity: sensor.doorbot_servo_voltage
+temperature_sensor_entity: sensor.doorbot_servo_temperature
 auto_lock_seconds: 0
 max_failed_attempts: 5
 lockout_seconds: 300
@@ -55,6 +58,9 @@ created. With the stock `esphome/doorbot.yaml` from the repo and a device named
 | `moving_binary_sensor_entity` | Read, to know when a turn has finished |
 | `holding_binary_sensor_entity` | Read, to confirm the servo is really holding |
 | `move_result_entity` | Read, for how the last move ended (arrived / jammed / timeout) |
+| `online_binary_sensor_entity` | Read, to know whether a servo is answering on the bus at all |
+| `voltage_sensor_entity` | Read, for the bus voltage |
+| `temperature_sensor_entity` | Read, for the servo temperature |
 
 The last three are how DoorBot verifies a move instead of assuming it worked.
 If they are wrong, every lock and unlock will be reported as a failure.

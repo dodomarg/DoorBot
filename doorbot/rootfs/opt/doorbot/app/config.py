@@ -28,6 +28,13 @@ DEFAULTS: dict[str, Any] = {
     "moving_binary_sensor_entity": "binary_sensor.doorbot_moving",
     "holding_binary_sensor_entity": "binary_sensor.doorbot_holding_position",
     "move_result_entity": "sensor.doorbot_last_move",
+    # The servo's own reachability, straight from the firmware's ping. This is
+    # the authoritative "is there actually a motor on the bus" signal: the ESP32
+    # can be online and publishing while the servo itself is unpowered or
+    # miswired.
+    "online_binary_sensor_entity": "binary_sensor.doorbot_servo_online",
+    "voltage_sensor_entity": "sensor.doorbot_servo_voltage",
+    "temperature_sensor_entity": "sensor.doorbot_servo_temperature",
     # Home Assistant connection. Under the Supervisor these are injected.
     "hass_url": "http://supervisor/core",
     "hass_token": "",

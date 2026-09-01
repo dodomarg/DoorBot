@@ -88,6 +88,9 @@ class MockBackend(BaseBackend):
         self._goal = self._position
         self._speed = float(calibration.get("speed", 800) or 800)
         self._torque = True
+        # Lets the test suite and the dev panel reproduce an unpowered or
+        # miswired servo, which is otherwise impossible to exercise in mock mode.
+        self.offline = False
         self._last = time.monotonic()
         self._load = 0.0
         self._voltage = 12.1
@@ -188,7 +191,7 @@ class MockBackend(BaseBackend):
         with self._lock:
             self._tick()
             return {
-                "online": True,
+                "online": not self.offline,
                 "position": int(round(self._position)),
                 "goal": int(round(self._goal)),
                 "degrees": raw_to_degrees(int(round(self._position))),
@@ -211,6 +214,10 @@ class MockBackend(BaseBackend):
 
     def move_to(self, position: int, speed: int | None = None) -> None:
         with self._lock:
+            if self.offline:
+                # A servo that is not on the bus swallows the command silently,
+                # exactly as the real one does.
+                return
             self._tick()
             if speed:
                 self._speed = float(speed)
@@ -272,15 +279,25 @@ class EsphomeBackend(BaseBackend):
         position = self._num(self.options.get("position_sensor_entity", ""))
         load = self._num(self.options.get("load_sensor_entity", ""))
         torque_state = self.hass.state(self.options.get("torque_switch_entity", ""))
-        online = position is not None
+        # Prefer the firmware's own ping result. Inferring reachability from
+        # "did the position sensor parse as a number" conflates three different
+        # failures -- servo unpowered, ESP32 offline, entity misnamed -- and
+        # reports the first two as a position of 0, which reads as a real
+        # measurement rather than as missing data.
+        online_entity = self.options.get("online_binary_sensor_entity", "")
+        online_state = self.hass.state(online_entity) if online_entity else None
+        if online_state is not None:
+            online = online_state.get("state") == "on"
+        else:
+            online = position is not None
         return {
             "online": online,
             "position": int(position) if position is not None else 0,
             "goal": int(self._num(self.options.get("position_number_entity", "")) or 0),
             "degrees": raw_to_degrees(int(position)) if position is not None else 0.0,
             "load": int(load) if load is not None else 0,
-            "voltage": self._num("sensor.doorbot_voltage") or 0.0,
-            "temperature": self._num("sensor.doorbot_temperature") or 0.0,
+            "voltage": self._num(self.options.get("voltage_sensor_entity", "")) or 0.0,
+            "temperature": self._num(self.options.get("temperature_sensor_entity", "")) or 0.0,
             "torque": bool(torque_state and torque_state.get("state") == "on"),
             "moving": self._is_on(self.options.get("moving_binary_sensor_entity", "")),
             # These come straight from the firmware, which verifies them against
@@ -433,7 +450,11 @@ class LockController:
         with self._lock:
             servo = self.backend.status()
             cal = self.db.get_calibration()
-            if servo.get("jammed"):
+            if not servo.get("online", True):
+                # No servo on the bus means no trustworthy position, so the
+                # lock state is genuinely unknown rather than "wherever it was".
+                self._state = STATE_UNKNOWN
+            elif servo.get("jammed"):
                 self._state = STATE_JAMMED
             elif not servo.get("moving") and self._state != STATE_JAMMED:
                 # A jam stays visible until a movement actually succeeds.
@@ -448,11 +469,40 @@ class LockController:
             }
 
     # ------------------------------------------------------------- movement
+    def _require_online(self, actor: str = "system") -> dict[str, Any]:
+        """Return the servo status, refusing to proceed if it is not answering.
+
+        Every path that commands motion goes through here. Without it a missing
+        servo looks identical to a successful move, because nothing downstream
+        distinguishes "reported position 0" from "no reading at all".
+        """
+        servo = self.backend.status()
+        if not servo.get("online", True):
+            self._state = STATE_UNKNOWN
+            self.db.log("offline", "Refused to move: the servo is not responding", actor=actor)
+            self._emit("offline", {"actor": actor})
+            raise BackendError(
+                "The servo is not responding - check that it is powered, wired to "
+                "the driver board, and set to the configured servo id."
+            )
+        return servo
+
     def _drive(self, position: int, speed: int | None, actor: str) -> dict[str, Any]:
         """Move to a position, wait for it to settle, and verify it got there."""
+        # Refuse to command a servo that is not answering. Without this the move
+        # is sent into the void, and the drift check below then reports it as
+        # "stopped N steps short", which blames the mechanism for what is really
+        # a wiring, power or configuration fault.
+        self._require_online(actor)
+
         self.backend.move_to(position, speed)
         servo = self._settle()
         result = servo.get("move_result", "")
+        if not servo.get("online", True):
+            self._state = STATE_UNKNOWN
+            self.db.log("offline", "The servo stopped responding mid-move", actor=actor)
+            self._emit("offline", {"actor": actor})
+            raise BackendError("The servo stopped responding while moving.")
         if servo.get("jammed") or result in ("jammed", "timeout"):
             self._state = STATE_JAMMED
             reason = "jammed" if result != "timeout" else "timed out"
@@ -625,7 +675,7 @@ class LockController:
     # --------------------------------------------------------- calibration
     def jog(self, delta: int) -> dict[str, Any]:
         with self._lock:
-            servo = self.backend.status()
+            servo = self._require_online("ui")
             if not servo["torque"] and isinstance(self.backend, MockBackend):
                 self.backend.nudge_by_hand(delta)
             else:
@@ -635,6 +685,7 @@ class LockController:
 
     def goto(self, position: int) -> dict[str, Any]:
         with self._lock:
+            self._require_online("ui")
             cal = self.db.get_calibration()
             low, high = travel_limits(bool(cal.get("multi_turn")))
             target = max(low, min(high, int(position)))
@@ -644,6 +695,7 @@ class LockController:
 
     def set_torque(self, enabled: bool) -> dict[str, Any]:
         with self._lock:
+            self._require_online("ui")
             self.backend.set_torque(enabled)
             return self.status()
 
@@ -652,6 +704,7 @@ class LockController:
         if which not in ("locked", "unlocked"):
             raise BackendError("Capture either 'locked' or 'unlocked'.")
         with self._lock:
+            self._require_online("ui")
             position = self._settle(8.0)["position"]
             cal = self.db.save_calibration({f"{which}_position": position})
             travel = abs(cal["locked_position"] - cal["unlocked_position"])

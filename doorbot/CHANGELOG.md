@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.2
+
+- **A servo that is not responding is now an error, not a silent success.**
+  Every path that commands motion — lock, unlock, open, jog, go-to, torque and
+  capture — checks first that the servo is answering, and refuses with a plain
+  explanation if it is not. Previously the command was sent into the void and
+  the move was reported as successful.
+- **The web UI says when nothing is connected.** A red banner appears when the
+  servo is not answering and the controls that move it are disabled; an amber
+  banner appears whenever the add-on is running the simulator, which reports
+  every move as a success by design. Neither state was visible before, so a
+  simulated lock looked identical to a real one.
+- **Servo reachability is read from the firmware instead of guessed.** The
+  add-on now reads `binary_sensor.doorbot_servo_online`, which the ESP32
+  publishes from its own ping. It previously inferred reachability from whether
+  the position sensor parsed as a number, which reports an unpowered servo as
+  position 0 — indistinguishable from a real reading.
+- **Fixed: bus voltage and temperature always read zero.** The add-on asked for
+  `sensor.doorbot_voltage` and `sensor.doorbot_temperature`, but the firmware
+  publishes `sensor.doorbot_servo_voltage` and `sensor.doorbot_servo_temperature`.
+  All three entity ids are now configurable rather than hardcoded.
+- **Fixed: the reported version was two releases out of date.** The code said
+  0.1.0 while the manifest said 0.2.1. The test suite now fails if they diverge.
+- The lock state reads *unknown* while the servo is unreachable, rather than
+  reporting the last position it happened to see.
+- The simulator panel gained a *Pretend the servo is unplugged* toggle, so this
+  failure can be reproduced without unplugging anything.
+
 ## 0.2.1
 
 - **Support the Feetech ST3235 alongside the ST3215.** They share the SMS/STS

@@ -20,6 +20,24 @@
   <div class="statechip" id="statechip">&mdash;</div>
 </header>
 
+<div class="banner banner-bad" id="offlineBanner" hidden>
+  <span class="banner-icon" aria-hidden="true">&#9888;</span>
+  <div>
+    <strong>The servo is not responding.</strong>
+    <span>Nothing will move. Check that the servo is powered, that the data line is
+    wired to the driver board, and that its id matches the configured servo id.</span>
+  </div>
+</div>
+
+<div class="banner banner-warn" id="mockBanner" hidden>
+  <span class="banner-icon" aria-hidden="true">&#128421;</span>
+  <div>
+    <strong>Simulator mode &mdash; no hardware is connected.</strong>
+    <span>Every move below is simulated and will always report success. Set
+    <code>backend: esphome</code> in the add-on configuration to drive the real lock.</span>
+  </div>
+</div>
+
 <nav class="tabs" role="tablist">
   <button class="tab active" data-tab="lock" role="tab">Lock</button>
   <button class="tab" data-tab="calibrate" role="tab">Calibration</button>
@@ -46,8 +64,8 @@
           </div>
         </div>
         <div class="hero-actions">
-          <button class="btn big primary" id="btnLock">Lock</button>
-          <button class="btn big" id="btnUnlock">Unlock</button>
+          <button class="btn big primary" id="btnLock" data-needs-servo>Lock</button>
+          <button class="btn big" id="btnUnlock" data-needs-servo>Unlock</button>
           <button class="btn ghost" id="btnStop">Stop</button>
         </div>
       </div>
@@ -93,23 +111,23 @@
           <h3>1. Release the servo</h3>
           <p>Turn torque off so you can move the thumbturn freely by hand.</p>
           <div class="row">
-            <button class="btn" id="btnTorqueOff">Release servo</button>
-            <button class="btn" id="btnTorqueOn">Hold position</button>
+            <button class="btn" id="btnTorqueOff" data-needs-servo>Release servo</button>
+            <button class="btn" id="btnTorqueOn" data-needs-servo>Hold position</button>
           </div>
         </li>
         <li>
           <h3>2. Find the locked position</h3>
           <p>Jog or hand-turn until the bolt is fully thrown, then capture it.</p>
           <div class="row jog">
-            <button class="btn" data-jog="-100">&laquo; 100</button>
-            <button class="btn" data-jog="-25">&laquo; 25</button>
-            <button class="btn" data-jog="-5">&laquo; 5</button>
-            <button class="btn" data-jog="5">5 &raquo;</button>
-            <button class="btn" data-jog="25">25 &raquo;</button>
-            <button class="btn" data-jog="100">100 &raquo;</button>
+            <button class="btn" data-jog="-100" data-needs-servo>&laquo; 100</button>
+            <button class="btn" data-jog="-25" data-needs-servo>&laquo; 25</button>
+            <button class="btn" data-jog="-5" data-needs-servo>&laquo; 5</button>
+            <button class="btn" data-jog="5" data-needs-servo>5 &raquo;</button>
+            <button class="btn" data-jog="25" data-needs-servo>25 &raquo;</button>
+            <button class="btn" data-jog="100" data-needs-servo>100 &raquo;</button>
           </div>
           <div class="row">
-            <button class="btn primary" data-capture="locked">Set as LOCKED</button>
+            <button class="btn primary" data-capture="locked" data-needs-servo>Set as LOCKED</button>
             <span class="pill" id="pillLocked">&mdash;</span>
           </div>
         </li>
@@ -117,15 +135,15 @@
           <h3>3. Find the unlocked position</h3>
           <p>Now move to where the bolt is fully retracted and capture that.</p>
           <div class="row">
-            <button class="btn primary" data-capture="unlocked">Set as UNLOCKED</button>
+            <button class="btn primary" data-capture="unlocked" data-needs-servo>Set as UNLOCKED</button>
             <span class="pill" id="pillUnlocked">&mdash;</span>
           </div>
         </li>
         <li>
           <h3>4. Test it</h3>
           <div class="row">
-            <button class="btn" id="btnTestLock">Test lock</button>
-            <button class="btn" id="btnTestUnlock">Test unlock</button>
+            <button class="btn" id="btnTestLock" data-needs-servo>Test lock</button>
+            <button class="btn" id="btnTestUnlock" data-needs-servo>Test unlock</button>
             <button class="btn danger ghost" id="btnResetCal">Reset calibration</button>
           </div>
         </li>
@@ -185,7 +203,7 @@
         <label>Hold for <small>seconds, 0 = off</small>
           <input type="number" name="hold_seconds" min="0" max="60"></label>
         <div class="formactions">
-          <button type="button" class="btn" id="btnTryHold">Try it</button>
+          <button type="button" class="btn" id="btnTryHold" data-needs-servo>Try it</button>
           <button type="submit" class="btn primary">Save hold settings</button>
         </div>
       </form>
@@ -195,6 +213,7 @@
       <h2>Simulator</h2>
       <p class="muted">Only available with the mock backend. Handy for checking jam handling.</p>
       <label class="check"><input type="checkbox" id="jamToggle"> Make the next movement jam</label>
+      <label class="check"><input type="checkbox" id="offlineToggle"> Pretend the servo is unplugged</label>
     </div>
   </section>
 

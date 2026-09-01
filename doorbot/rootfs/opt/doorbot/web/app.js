@@ -108,7 +108,17 @@ function renderStatus(status) {
 
   $('#subtitle').textContent =
     `${status.backend === 'mock' ? 'Simulator' : 'ESPHome'} · ` +
+    (servo.online === false ? 'servo offline · ' : '') +
     (status.calibrated ? 'calibrated' : 'not calibrated yet');
+
+  // The two conditions that make every other reading on this page meaningless.
+  const offline = servo.online === false;
+  $('#offlineBanner').hidden = !offline;
+  $('#mockBanner').hidden = status.backend !== 'mock';
+  document.querySelectorAll('[data-needs-servo]').forEach((el) => {
+    el.disabled = offline;
+    el.title = offline ? 'The servo is not responding.' : '';
+  });
 
   $('#pillLocked').textContent = `${cal.locked_position} (${(cal.locked_position * 360 / 4096).toFixed(0)}°)`;
   $('#pillLocked').classList.toggle('set', !!status.calibrated);
@@ -409,6 +419,12 @@ function bindEvents() {
 
   $('#jamToggle').onchange = (ev) =>
     run(() => api('dev/jam', { method: 'POST', body: { enabled: ev.target.checked } }));
+
+  $('#offlineToggle').onchange = (ev) =>
+    run(async () => {
+      await api('dev/offline', { method: 'POST', body: { enabled: ev.target.checked } });
+      renderStatus(await api('status'));
+    });
 
   // Virtual keypad
   $$('#virtualKeypad .key').forEach((key) => {

@@ -5,7 +5,7 @@ SRC, ATTACKER = "test-" + RUN, "attacker-" + RUN
 B="http://localhost:8099/api/"
 POSTS = ("lock","unlock","stop","verify","dev/jam","keypad/event","keypad/settings",
          "keypad/credentials",
-         "open","dev/slip",
+         "open","dev/slip","dev/offline",
          "calibration","calibration/torque","calibration/goto","calibration/jog",
          "calibration/capture","calibration/reset","codes")
 def call(p, body=None, method=None):
@@ -27,6 +27,7 @@ call("keypad/settings", {"enabled": True, "action": "unlock",
                          "min_interval_seconds": 0, "known_credentials_only": False})
 call("calibration/reset")
 call("dev/jam", {"enabled": False})   # in case an earlier run aborted mid-jam
+call("dev/offline", {"enabled": False})
 
 # --- calibration wizard ---
 call("calibration/torque", {"enabled": False})
@@ -273,6 +274,39 @@ ok("jam detected", j.get("HTTP")==409)
 call("dev/jam", {"enabled":False})
 ok("state sticky jammed", call("status")["state"]=="jammed")
 ok("recovers after clearing jam", call("unlock")["state"]=="unlocked")
+
+# --- servo offline: every path that moves the motor must refuse and say why ---
+# This is the class of bug the suite used to be blind to: a move against a servo
+# that is not there used to report success.
+call("unlock"); time.sleep(0.6)
+call("dev/offline", {"enabled": True})
+s=call("status")
+ok("status reports servo offline", s["servo"]["online"] is False)
+ok("state is unknown while offline", s["state"]=="unknown")
+for _name, _p, _b in (("lock","lock",None), ("unlock","unlock",None),
+                      ("open","open",None),
+                      ("jog","calibration/jog",{"delta":25}),
+                      ("goto","calibration/goto",{"position":2400}),
+                      ("torque","calibration/torque",{"enabled":True}),
+                      ("capture","calibration/capture",{"which":"locked"})):
+    r=call(_p, _b)
+    ok("offline %s is rejected" % _name, r.get("HTTP")==409)
+    ok("offline %s explains why" % _name, "not responding" in r.get("error","").lower())
+before=call("status")["servo"]["position"]
+call("dev/offline", {"enabled": False})
+ok("recovers when the servo comes back", call("status")["servo"]["online"] is True)
+ok("offline moves never moved anything", call("status")["servo"]["position"]==before)
+ok("offline logged", any(e["kind"]=="offline" for e in call("events?limit=100")["events"]))
+ok("unlock works again after recovery", call("unlock")["state"]=="unlocked")
+
+
+# The add-on manifest and the code used to carry different version numbers, so
+# the UI reported a version that had not existed for two releases.
+import re as _re, pathlib as _pl
+_manifest = _pl.Path(__file__).resolve().parent.parent / "doorbot" / "config.yaml"
+_declared = _re.search(r'^version:\s*"?([^"\n]+)"?', _manifest.read_text(), _re.M).group(1).strip()
+ok("code version matches the add-on manifest", call("info")["version"] == _declared)
+
 
 ok("events logged", len(call("events?limit=100")["events"])>10)
 print("\nALL TESTS PASSED")

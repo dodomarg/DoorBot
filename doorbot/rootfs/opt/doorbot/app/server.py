@@ -145,6 +145,7 @@ class DoorBotApp:
 
         r.add("POST", "/api/dev/jam", self.api_dev_jam)
         r.add("POST", "/api/dev/slip", self.api_dev_slip)
+        r.add("POST", "/api/dev/offline", self.api_dev_offline)
 
     # ---------------------------------------------------------- API methods
     def api_status(self, rq: Request) -> dict[str, Any]:
@@ -359,6 +360,13 @@ class DoorBotApp:
         backend.slip_next_hold = bool(rq.body.get("enabled", True))  # type: ignore[attr-defined]
         return {"slip_next_hold": backend.slip_next_hold}  # type: ignore[attr-defined]
 
+    def api_dev_offline(self, rq: Request) -> dict[str, Any]:
+        backend = self.controller.backend
+        if not hasattr(backend, "offline"):
+            raise ApiError("Offline simulation is only available with the mock backend.")
+        backend.offline = bool(rq.body.get("enabled", True))  # type: ignore[attr-defined]
+        return {"offline": backend.offline}  # type: ignore[attr-defined]
+
     # -------------------------------------------------------- rate limiting
     def _rate_limited(self, source: str) -> bool:
         limit = int(self.config.get("max_failed_attempts") or 0)
@@ -380,7 +388,7 @@ class DoorBotApp:
             self._attempts.pop(source, None)
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.2"
 
 
 class DoorBotHandler(BaseHTTPRequestHandler):
