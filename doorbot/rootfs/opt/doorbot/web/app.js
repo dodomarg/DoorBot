@@ -53,6 +53,19 @@ const MOVE_LABELS = {
 
 // In multi-turn mode a goal is no longer confined to one 0..4095 revolution,
 // so the position inputs have to open up to match the firmware.
+const RESOLUTION = 4096;
+
+// A raw step count only reads as an angle while it stays inside one
+// revolution. Past that, degrees are meaningless and turns are the honest unit.
+function formatPos(raw, multiTurn) {
+  if (raw == null) return '—';
+  const deg = ((raw % RESOLUTION) + RESOLUTION) % RESOLUTION * 360 / RESOLUTION;
+  if (multiTurn && Math.abs(raw) >= RESOLUTION) {
+    return `${raw} (${(raw / RESOLUTION).toFixed(2)} turns)`;
+  }
+  return `${raw} (${deg.toFixed(0)}°)`;
+}
+
 function applyTravelRange(multiTurn) {
   const lo = multiTurn ? -30719 : 0;
   const hi = multiTurn ? 30719 : 4095;
@@ -120,13 +133,12 @@ function renderStatus(status) {
     el.title = offline ? 'The servo is not responding.' : '';
   });
 
-  $('#pillLocked').textContent = `${cal.locked_position} (${(cal.locked_position * 360 / 4096).toFixed(0)}°)`;
+  $('#pillLocked').textContent = formatPos(cal.locked_position, cal.multi_turn);
   $('#pillLocked').classList.toggle('set', !!status.calibrated);
-  $('#pillUnlocked').textContent = `${cal.unlocked_position} (${(cal.unlocked_position * 360 / 4096).toFixed(0)}°)`;
+  $('#pillUnlocked').textContent = formatPos(cal.unlocked_position, cal.multi_turn);
   $('#pillUnlocked').classList.toggle('set', !!status.calibrated);
 
   if (!$('#calForm').dataset.dirty) fillForm($('#calForm'), cal);
-  if (!$('#holdForm').dataset.dirty) fillForm($('#holdForm'), cal);
   renderDirection(status);
   $('#devCard').hidden = status.backend !== 'mock';
 
@@ -436,20 +448,6 @@ function bindEvents() {
       renderStatus(status);
     }, 'Settings saved');
   };
-
-  const holdForm = $('#holdForm');
-  holdForm.oninput = () => { holdForm.dataset.dirty = '1'; };
-  holdForm.onsubmit = (ev) => {
-    ev.preventDefault();
-    run(async () => {
-      const status = await api('calibration', { method: 'POST', body: readForm(holdForm) });
-      delete holdForm.dataset.dirty;
-      renderStatus(status);
-    }, 'Hold settings saved');
-  };
-  $('#btnTryHold').onclick = () =>
-    run(async () => renderStatus(await api('open', { method: 'POST' })),
-      'Unlocked and held the latch');
 
   $('#btnSwapDir').onclick = () =>
     run(async () => renderStatus(await api('calibration/swap', { method: 'POST' })),

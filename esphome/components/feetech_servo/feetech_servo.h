@@ -252,6 +252,23 @@ class FeetechServo : public PollingComponent, public uart::UARTDevice {
   void publish_holding_(bool holding);
   int32_t clamp_target_(int32_t position) const;
 
+  /// SAFETY: a lock must never be left energised. A servo holding position is a
+  /// servo a person cannot turn by hand, which on a door means somebody can be
+  /// shut in or shut out by a firmware fault. The invariant enforced here is
+  /// that torque is only ever on while a move is actually in progress; at any
+  /// other moment it is released. Called on every loop, not just during moves.
+  void enforce_safe_state_();
+
+  /// Writes torque off and confirms it by reading the register back. Returns
+  /// false if the servo did not actually release.
+  bool release_torque_now_();
+
+  /// Converts the servo's 0..4095 reading into a continuous multi-turn value.
+  /// In multi-turn mode the ST3215/ST3235 still wraps Present_Position at one
+  /// revolution, so a goal beyond 4095 can never be seen as reached and the
+  /// move engine chases it forever.
+  int32_t unwrap_position_(int32_t raw);
+
   /// Feetech encodes some values as sign+magnitude rather than two's complement.
   static int decode_sign_magnitude(uint16_t raw, uint8_t sign_bit);
   static uint16_t encode_sign_magnitude(int value, uint8_t sign_bit);
@@ -260,6 +277,24 @@ class FeetechServo : public PollingComponent, public uart::UARTDevice {
   uint16_t default_speed_{800};
   uint8_t default_acceleration_{30};
   uint32_t timeout_ms_{20};
+
+  /// Longest a move may keep the servo energised before it is aborted and
+  /// released, regardless of what the move engine thinks is happening.
+  uint32_t max_energised_ms_{15000};
+  /// Grace after a move ends before the release is enforced, so a normal
+  /// finish_move_() release is not immediately re-reported as a violation.
+  uint32_t release_grace_ms_{750};
+  /// Consecutive failed releases before the firmware restarts itself. Rebooting
+  /// re-runs setup(), which forces torque off before anything else.
+  uint8_t release_failures_{0};
+  static const uint8_t MAX_RELEASE_FAILURES = 5;
+  uint32_t torque_since_{0};
+  uint32_t release_retry_at_{0};
+
+  /// Multi-turn unwrapping state.
+  int32_t raw_position_last_{0};
+  int32_t turn_offset_{0};
+  bool unwrap_primed_{false};
 
   bool want_multi_turn_{false};
   bool multi_turn_{false};

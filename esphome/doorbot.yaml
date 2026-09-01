@@ -179,12 +179,20 @@ feetech_servo:
   uart_id: servo_bus
   servo_id: 1
   update_interval: 1s
-  # Multi-turn absolute mode: the official ST3215 register map says that with
-  # both angle limits set to 0 the goal register accepts -30719..30719 instead
-  # of 0..4095, which is what a euro cylinder needing two or three full turns
-  # requires. The revolution count is lost on power loss, so the lock re-reads
-  # its position on boot rather than assuming it.
-  multi_turn: true
+  # Multi-turn absolute mode: with both angle limits set to 0 the goal register
+  # accepts -30719..30719 instead of 0..4095, which is what a euro cylinder
+  # needing two or three full turns requires.
+  #
+  # OFF by default, and that matters. Present_Position still wraps at 4096 no
+  # matter what the goal register accepts, so a goal beyond one revolution can
+  # never be *observed* as reached. Before the unwrap logic existed, that made
+  # the servo chase a goal it could never see itself hit -- it ran away at the
+  # configured speed instead of reporting a failure. The firmware now unwraps
+  # the reading, but the revolution count still starts at zero on every boot,
+  # so absolute multi-turn position does not survive a reset. Only turn this on
+  # if your cylinder genuinely needs more than one revolution, and re-home after
+  # a reboot when it does.
+  multi_turn: false
   # A move only counts as finished once the servo is within this many steps of
   # the goal for two consecutive samples.
   tolerance: 25

@@ -104,10 +104,12 @@ the output shaft. A mirrored mount or an extra gear reverses that. Tick **the
 thumbturn turns the opposite way to the arrows** and the jog arrows flip to
 match what you actually see.
 
-The hold-open position must lie past **unlocked**, turning the same way
-unlocking turns. A value on the locked side would drive the bolt back out while
-reporting the door as held open, so it is refused. If you later change the
-direction, a hold point left on the wrong side is retired automatically.
+> **Hold-open has been removed.** It worked by keeping the servo energised past
+> the unlocked point so a passive outside handle could push the door. A servo
+> under torque cannot be turned by hand, so that is a servo capable of trapping
+> someone on the wrong side of a door. **Open** now simply unlocks. The
+> direction rules below still apply to the stored hold point, which is kept
+> only so the setting can be restored if a bounded version is ever added.
 
 There are also fine controls:
 

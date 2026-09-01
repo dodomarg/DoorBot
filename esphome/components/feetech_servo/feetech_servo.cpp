@@ -102,6 +102,15 @@ void FeetechServo::setup() {
   }
 
   if (this->online_) {
+    // SAFETY: release before anything else. A servo keeps its torque state
+    // across an ESP32 reset, so a crash or a watchdog reboot while energised
+    // would otherwise leave the door held shut with no way to turn it by hand.
+    // This is the recovery path the release watchdog reboots into.
+    if (this->release_torque_now_()) {
+      ESP_LOGI(TAG, "Servo released at boot");
+    } else {
+      ESP_LOGE(TAG, "Could not release the servo at boot - it may be holding the lock");
+    }
     // Bring the servo's own travel limits in line with the configuration. Both
     // helpers read before writing, so a servo that is already set up costs
     // nothing and takes no EEPROM wear.
@@ -341,6 +350,8 @@ bool FeetechServo::ping() { return this->send_and_receive_(STS_INST_PING, nullpt
 optional<uint8_t> FeetechServo::read_status() { return this->read_register_u8(STS_REG_STATUS); }
 
 void FeetechServo::set_torque(bool enabled) {
+  if (enabled)
+    this->torque_since_ = millis();
   if (this->write_register_u8(STS_REG_TORQUE_ENABLE, enabled ? STS_TORQUE_ON : STS_TORQUE_OFF)) {
     ESP_LOGD(TAG, "Torque %s", enabled ? "enabled" : "released");
   } else {
@@ -382,6 +393,9 @@ void FeetechServo::move_to(int32_t position, int speed, int acceleration) {
     velocity = STS_MAX_SPEED;
 
   this->goal_ = position;
+  // Restart the energised clock: this is the moment the servo starts resisting
+  // a hand turn, and the safety watchdog measures from here.
+  this->torque_since_ = millis();
   this->write_register_u8(STS_REG_TORQUE_ENABLE, STS_TORQUE_ON);
   this->write_register_u8(STS_REG_ACCELERATION, accel);
   this->write_register_u16(STS_REG_GOAL_VELOCITY, encode_sign_magnitude(velocity, 15));
@@ -450,8 +464,9 @@ void FeetechServo::start_seek_stall(int direction, int load_threshold, int32_t m
 void FeetechServo::abort_move() {
   if (this->move_result_ != MoveResult::MOVING)
     return;
-  if (this->position_ >= 0)
-    this->move_to(this->position_, this->move_speed_);
+  // SAFETY: do NOT command a hold at the current position first. That re-arms
+  // torque and would clamp the lock exactly where the abort was meant to free
+  // it. Cutting torque is what stops the servo; finish_move_() does that.
   this->finish_move_(MoveResult::ABORTED);
 }
 
@@ -465,7 +480,88 @@ void FeetechServo::finish_move_(MoveResult result) {
     ESP_LOGW(TAG, "Move ended as %s at %d (goal %d, load %d)", move_result_to_string(result),
              (int) this->position_, (int) this->goal_, this->load_);
   }
+  // SAFETY: the move is over, so the servo must stop resisting the thumbturn.
+  // This is the normal release path; enforce_safe_state_() is the backstop for
+  // when it fails.
+  if (!this->release_torque_now_())
+    ESP_LOGE(TAG, "Could not release torque after the move - the watchdog will retry");
   this->verify_holding();
+}
+
+bool FeetechServo::release_torque_now_() {
+  this->write_register_u8(STS_REG_TORQUE_ENABLE, STS_TORQUE_OFF);
+  // Trust nothing: read it back. A write that was never acknowledged would
+  // otherwise leave the lock energised while we report it as released.
+  const auto now_off = this->read_register_u8(STS_REG_TORQUE_ENABLE);
+  if (!now_off.has_value())
+    return false;
+  this->torque_on_ = (*now_off != STS_TORQUE_OFF);
+  if (this->torque_on_)
+    return false;
+  this->publish_holding_(false);
+  return true;
+}
+
+void FeetechServo::enforce_safe_state_() {
+  const uint32_t now = millis();
+
+  if (this->move_result_ == MoveResult::MOVING) {
+    // A move that overruns its energised budget is aborted rather than allowed
+    // to keep pushing. finish_move_() releases on the way out.
+    if (now - this->torque_since_ > this->max_energised_ms_) {
+      ESP_LOGE(TAG, "Move exceeded the %u ms energised limit - aborting and releasing",
+               (unsigned) this->max_energised_ms_);
+      this->finish_move_(MoveResult::TIMEOUT);
+    }
+    return;
+  }
+
+  if (!this->torque_on_) {
+    this->release_failures_ = 0;
+    this->status_clear_error();
+    return;
+  }
+
+  // Torque is on with no move running. Give a just-finished move a moment for
+  // its own release to land, then take over.
+  if (now - this->torque_since_ < this->release_grace_ms_)
+    return;
+  if (now - this->release_retry_at_ < 250)
+    return;
+  this->release_retry_at_ = now;
+
+  if (this->release_torque_now_()) {
+    ESP_LOGW(TAG, "Watchdog released a servo that was left energised at rest");
+    this->release_failures_ = 0;
+    this->status_clear_error();
+    return;
+  }
+
+  this->release_failures_++;
+  ESP_LOGE(TAG, "Watchdog could not release the servo (attempt %u of %u)",
+           (unsigned) this->release_failures_, (unsigned) MAX_RELEASE_FAILURES);
+  if (this->release_failures_ < MAX_RELEASE_FAILURES)
+    return;
+
+  // Escalation, but only where escalating can actually help.
+  if (!this->online_) {
+    // The bus is dead. A reboot cannot issue a release it cannot transmit, and
+    // rebooting on a 1-second cadence would cost us logs, OTA and the HA
+    // connection -- everything needed to diagnose this. Stay up and shout.
+    this->status_set_error(LOG_STR("Servo may be left energised and the bus is unreachable"));
+    ESP_LOGE(TAG,
+             "SERVO UNREACHABLE while possibly energised. Firmware cannot release it; "
+             "cut servo power to restore manual operation.");
+    this->release_failures_ = 0;  // keep retrying and re-reporting, do not reboot
+    return;
+  }
+
+  // The servo answers but will not drop torque. A reboot re-runs setup(), which
+  // forces torque off before anything else, and costs a few seconds of
+  // availability to recover manual operation of the door.
+  ESP_LOGE(TAG, "Servo refuses to release torque - restarting to force it off");
+  delay(50);  // let the log line reach the wire before we go
+  App.safe_reboot();
 }
 
 void FeetechServo::publish_result_() {
@@ -671,7 +767,9 @@ bool FeetechServo::refresh_motion_() {
 
   // Position is sign+magnitude with bit 15 as the sign. In single-turn mode the
   // value is always positive, so this decode is correct either way.
-  this->position_ = decode_sign_magnitude(static_cast<uint16_t>(buffer[0] | (buffer[1] << 8)), 15);
+  const int32_t raw_position =
+      decode_sign_magnitude(static_cast<uint16_t>(buffer[0] | (buffer[1] << 8)), 15);
+  this->position_ = this->unwrap_position_(raw_position);
   this->velocity_ = decode_sign_magnitude(static_cast<uint16_t>(buffer[2] | (buffer[3] << 8)), 15);
   this->load_ = decode_sign_magnitude(static_cast<uint16_t>(buffer[4] | (buffer[5] << 8)), 10);
   this->voltage_ = buffer[6] / 10.0f;
@@ -679,7 +777,39 @@ bool FeetechServo::refresh_motion_() {
   return true;
 }
 
+int32_t FeetechServo::unwrap_position_(int32_t raw) {
+  if (!this->multi_turn_) {
+    this->unwrap_primed_ = false;
+    this->turn_offset_ = 0;
+    return raw;
+  }
+  // Some firmware revisions do report an accumulated multi-turn position. If
+  // the reading is already outside one revolution it needs no help from us, and
+  // unwrapping it as well would double-count every crossing.
+  if (raw < 0 || raw > STS_RESOLUTION - 1) {
+    this->unwrap_primed_ = false;
+    this->turn_offset_ = 0;
+    return raw;
+  }
+  if (!this->unwrap_primed_) {
+    this->raw_position_last_ = raw;
+    this->unwrap_primed_ = true;
+  }
+  // A jump of more than half a revolution between two samples 25 ms apart is
+  // not real motion -- the servo's counter rolled over.
+  const int32_t delta = raw - this->raw_position_last_;
+  if (delta > STS_RESOLUTION / 2) {
+    this->turn_offset_ -= STS_RESOLUTION;
+  } else if (delta < -(STS_RESOLUTION / 2)) {
+    this->turn_offset_ += STS_RESOLUTION;
+  }
+  this->raw_position_last_ = raw;
+  return raw + this->turn_offset_;
+}
+
 void FeetechServo::loop() {
+  this->enforce_safe_state_();
+
   if (this->move_result_ != MoveResult::MOVING)
     return;
 

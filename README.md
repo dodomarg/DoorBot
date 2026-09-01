@@ -102,21 +102,47 @@ Tick **Multi-turn** before capturing the positions. The travel range opens from
 one revolution (0–4095) to ±30719 steps, so a euro cylinder that needs two or
 three turns works without gearing.
 
-The servo does not remember its revolution count across a power cut — that is a
-hardware limitation, not a bug. DoorBot re-homes after a reset.
+**Leave it off unless your lock genuinely needs it.** The goal register accepts
+±30719, but the servo still reports its position wrapped to 0–4095 — the two
+are not symmetrical. DoorBot's firmware unwraps the reading and tracks the
+revolution count itself, which is what makes multi-turn work at all; without
+that, a goal beyond one revolution can never be *observed* as reached and the
+servo chases it forever instead of reporting a failure.
 
-#### Doors with a passive outside handle
+The revolution count still starts at zero on every boot, so absolute multi-turn
+position does not survive a reset — that is a hardware limitation, not a bug. A
+multi-turn lock must be re-homed after a reboot. A lock whose travel fits
+inside one revolution has no such problem, which is the other reason to leave
+multi-turn off when you can.
 
-If the outside handle does not retract the latch, unlocking is not enough: the
-latch stays out and the door will not push open. Use the **Hold open** card —
-DoorBot turns past the unlocked point to a hold position, keeps the latch back
-for the number of seconds you set, then returns.
+Because a multi-turn step count is not an angle, the interface reports the
+angle *within the current revolution* alongside a separate turn count, rather
+than showing you something like "527°".
 
-Set **Hold for** to 0 if your handle retracts the latch itself.
+#### The servo is never left holding
 
-If the latch slips while being held, it is almost always the servo's own
-overload protection cutting output. Raise **Protective torque** on the ESP32
-device page; `docs/feetech-servo.md` explains the mechanism.
+DoorBot energises the servo only while a move is actually running, and releases
+it the moment the move ends. This is deliberate and non-negotiable: a servo
+holding position is a servo you cannot turn by hand, and on a door that means a
+firmware fault can trap someone on the wrong side.
+
+A watchdog in the firmware enforces it every loop. A move that overruns its
+energised budget is aborted and released; torque found on at rest is released
+within a second; and if the servo answers but refuses to let go, the node
+restarts, because `setup()` forces the release before it does anything else.
+Torque state lives in the servo's own register and survives an ESP32 reset, so
+the reboot alone would not clear it.
+
+There is one honest limit. If the serial bus itself is dead, the firmware
+cannot transmit a release at all, and no amount of rebooting changes that — it
+would only cost you the logs, OTA and Home Assistant connection you need to
+diagnose the fault. In that case DoorBot reports a component error and keeps
+retrying. **Cutting power to the servo is the only complete mitigation**, so
+put it on a switched supply if the door is the only way out of a room.
+
+A consequence worth stating plainly: **hold-open was removed.** Holding a latch
+retracted so a passive outside handle can push the door requires exactly the
+sustained torque this policy forbids.
 
 The calibration is also stored on the ESP32 itself in `restore_value` number
 entities, so the lock keeps working if the add-on or Home Assistant is down.

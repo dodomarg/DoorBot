@@ -43,7 +43,19 @@ MOVE_TOLERANCE = 25
 
 
 def raw_to_degrees(raw: int) -> float:
-    return round(raw * 360.0 / RESOLUTION, 1)
+    """Angle within the current revolution, 0..359.9.
+
+    In multi-turn mode a position can be several revolutions away from zero, so
+    the naive ``raw * 360 / 4096`` produces angles like 527deg that are not
+    angles at all. The shaft angle is the remainder; the revolution count is
+    reported separately by ``raw_to_turns``.
+    """
+    return round((raw % RESOLUTION) * 360.0 / RESOLUTION, 1)
+
+
+def raw_to_turns(raw: int) -> float:
+    """Signed revolutions from zero. 0.0 in single-turn mode's usual range."""
+    return round(raw / RESOLUTION, 2)
 
 
 def travel_limits(multi_turn: bool) -> tuple[int, int]:
@@ -247,7 +259,7 @@ class MockBackend(BaseBackend):
                 and not self._jammed,
                 "move_result": self._move_result,
                 "multi_turn": self._multi_turn,
-                "turns": round(self._position / RESOLUTION, 2),
+                "turns": raw_to_turns(int(round(self._position))),
             }
 
     def move_to(self, position: int, speed: int | None = None) -> None:
@@ -333,6 +345,7 @@ class EsphomeBackend(BaseBackend):
             "position": int(position) if position is not None else 0,
             "goal": int(self._num(self.options.get("position_number_entity", "")) or 0),
             "degrees": raw_to_degrees(int(position)) if position is not None else 0.0,
+            "turns": raw_to_turns(int(position)) if position is not None else 0.0,
             "load": int(load) if load is not None else 0,
             "voltage": self._num(self.options.get("voltage_sensor_entity", "")) or 0.0,
             "temperature": self._num(self.options.get("temperature_sensor_entity", "")) or 0.0,
@@ -617,81 +630,28 @@ class LockController:
             return self._travel("unlocked_position", STATE_UNLOCKED, actor)
 
     def open(self, actor: str = "ui") -> dict[str, Any]:
-        """Unlock, then hold the latch retracted so the door can be pushed.
+        """Unlock. The hold-open latch is retired -- see the note below.
 
-        Needed on doors whose outside handle is passive: turning the key back to
-        "unlocked" leaves the latch out, so the door still will not open. The
-        servo has to keep turning past that point and stay there.
+        This used to drive past "unlocked" to a hold point and keep the servo
+        energised there so a passive outside handle could push the door. That
+        requires the one thing the safety policy forbids: sustained torque with
+        nobody watching. A servo holding the latch is a servo that cannot be
+        overridden by hand, and a fault during the hold strands the door.
+
+        The firmware now releases torque at the end of every move, so a hold
+        cannot be sustained anyway -- keeping this code would only produce a
+        control that reports success while doing nothing.
         """
         with self._lock:
-            self.unlock(actor=actor)
             cal = self.db.get_calibration()
-            seconds = int(cal.get("hold_seconds") or 0)
-            if seconds <= 0:
-                return self.status()
-
-            # unlock() already armed auto-lock, but the grace period should
-            # start when the latch is released, not when the hold begins.
-            self._cancel_auto_lock()
-
-            hold_at = int(cal.get("hold_position") or cal["unlocked_position"])
-            unlocked_at = int(cal["unlocked_position"])
-            speed = cal.get("speed")
-            self._hold_generation += 1
-            generation = self._hold_generation
-            try:
-                self._drive(hold_at, speed, actor)
-            except BackendError:
-                # Never leave the latch part-way to the hold point.
-                self._release_latch(unlocked_at, speed, actor)
-                raise
-            self.db.log(
-                "hold_open",
-                f"Holding the latch at {hold_at} for {seconds}s",
-                actor=actor,
-                position=hold_at,
-                seconds=seconds,
-            )
-            self._emit("hold_open", {"actor": actor, "seconds": seconds})
-
-        # Deliberately outside the lock: a hold can last a minute, and blocking
-        # every status poll and the lock button for that long would be worse
-        # than useless - you could not cancel the hold you are stuck in.
-        slipped = False
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            time.sleep(0.1)
-            if self._hold_generation != generation:
-                return self.status()  # a newer command took over
-            if not self.backend.status().get("holding", True):
-                slipped = True
-                break
-
-        with self._lock:
-            if self._hold_generation != generation:
-                return self.status()
-            if slipped:
-                # Usually the servo's own overload protection cutting output
-                # after Protection time; the door may not have opened.
+            if int(cal.get("hold_seconds") or 0) > 0:
                 self.db.log(
-                    "hold_slipped", "The latch slipped while being held", actor=actor
+                    "hold_retired",
+                    "Hold-open is retired: the servo is never left holding "
+                    "torque. Unlocking normally instead.",
+                    actor=actor,
                 )
-                self._emit("hold_slipped", {"actor": actor})
-            self._release_latch(unlocked_at, speed, actor)
-            return self.status()
-
-    def _release_latch(self, unlocked_at: int, speed: int | None, actor: str) -> None:
-        """Return from the hold point. A lock must never fail latch-retracted."""
-        try:
-            self._drive(unlocked_at, speed, actor)
-            self._state = STATE_UNLOCKED
-        except BackendError:
-            self.db.log(
-                "jammed",
-                "Could not release the latch after holding it open",
-                actor=actor,
-            )
-        self._schedule_auto_lock(self._state)
+        return self.unlock(actor=actor)
 
     def toggle(self, actor: str = "ui") -> dict[str, Any]:
         return self.lock(actor) if self._state != STATE_LOCKED else self.unlock(actor)

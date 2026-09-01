@@ -1,5 +1,5 @@
 name: DoorBot
-version: "0.2.3"
+version: "0.2.4"
 slug: doorbot
 description: Calibrate a DIY servo deadbolt and manage its PIN codes, from inside Home Assistant.
 url: https://github.com/dodomarg/DoorBot

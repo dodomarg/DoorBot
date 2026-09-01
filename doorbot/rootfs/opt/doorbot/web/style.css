@@ -358,3 +358,6 @@ legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 6px;
 }
 .dirbadge.bad { background: rgba(208, 69, 59, .14); color: var(--bad); }
 .jog-legend { display: flex; justify-content: space-between; margin: .3rem .1rem 0; font-size: .8rem; }
+
+/* Banners are normally page-level; inside a card they follow the card padding. */
+.card .banner { margin: .5rem 0 0; }

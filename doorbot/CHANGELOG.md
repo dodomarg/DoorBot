@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.2.4
+
+- **The servo is never left holding torque.** A servo under torque cannot be
+  turned by hand, so on a door it can trap someone on the wrong side. Torque is
+  now energised only while a move is actually running and released the moment
+  it ends, with the release read back from the servo rather than assumed.
+- **Added a safety watchdog in the firmware.** Every loop it checks that the
+  servo is either moving or released. A move that overruns its energised budget
+  (15 s, above the 12 s move timeout) is aborted and released. Torque found on
+  at rest is released within a second. If the servo answers but refuses to drop
+  torque, the node restarts, and `setup()` forces the release before it does
+  anything else -- torque state lives in the servo and survives an ESP32 reset,
+  so the reboot alone would not have cleared it.
+- **The watchdog will not reboot into a dead bus.** If the servo is
+  unreachable, a restart cannot transmit the release either, and rebooting on a
+  one-second cadence would cost the logs, OTA and the Home Assistant connection
+  needed to diagnose it. It now reports a component error and keeps retrying
+  instead. If the bus is dead, only cutting servo power restores manual
+  operation -- no firmware can do it for you.
+- **Fixed: aborting a move re-energised the servo.** `abort_move()` commanded a
+  hold at the current position before finishing, which clamped the lock exactly
+  where the abort was meant to free it.
+- **Removed hold-open.** It worked by driving past the unlocked point and
+  keeping the servo energised there so a passive outside handle could push the
+  door. That is sustained torque with nobody watching, which the safety policy
+  forbids. *Open* now simply unlocks, and says so in the log rather than
+  silently doing nothing.
+
+### Multi-turn
+
+- **Fixed the runaway.** `multi_turn` let the goal register accept
+  -30719..30719, but the servo still reports `Present_Position` wrapped to
+  0..4095. A goal beyond one revolution could therefore never be observed as
+  reached, so the move engine chased it forever -- the position climbed at the
+  configured speed and wrapped, 3438 to 148 to 3371 to 81, while the UI
+  reported `arrived`. The firmware now unwraps the reading across the 4096
+  boundary and tracks the revolution count itself.
+- **`multi_turn` now defaults to off.** The revolution count still starts at
+  zero on every boot, so absolute multi-turn position does not survive a reset.
+  It is only worth enabling for a cylinder that genuinely needs more than one
+  turn, and such a setup needs re-homing after a reboot.
+- **Fixed: positions were displayed as 12-bit angles.** A multi-turn step count
+  is not an angle -- position 6000 was shown as 527 degrees. Degrees are now the
+  angle within the current revolution, with the revolution count reported
+  separately.
+- **Fixed: the Turns readout was always blank on real hardware.** The ESPHome
+  backend never emitted a `turns` value at all, so the metric only ever worked
+  in the simulator.
+
 ## 0.2.3
 
 - **The calibration wizard now shows the direction of rotation.** It is derived

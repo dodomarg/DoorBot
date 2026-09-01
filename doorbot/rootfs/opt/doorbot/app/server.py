@@ -389,7 +389,7 @@ class DoorBotApp:
             self._attempts.pop(source, None)
 
 
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 
 
 class DoorBotHandler(BaseHTTPRequestHandler):

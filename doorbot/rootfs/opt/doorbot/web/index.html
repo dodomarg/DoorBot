@@ -210,23 +210,20 @@
     </div>
 
     <div class="card">
-      <h2>Hold open</h2>
+      <h2>Hold open <span class="dirbadge bad">retired</span></h2>
       <p class="muted">
-        Some doors have a passive outside handle: turning the key back leaves the
-        latch out, so the door still will not push open. Here DoorBot keeps
-        turning past the unlocked point and holds the latch back for a moment.
-        Leave the duration at 0 if your handle retracts the latch itself.
+        This used to drive past the unlocked point and hold the latch retracted
+        so a passive outside handle could push the door open.
       </p>
-      <form id="holdForm" class="grid">
-        <label>Hold position <small id="holdRange">where the latch is fully retracted</small>
-          <input type="number" name="hold_position" min="0" max="4095"></label>
-        <label>Hold for <small>seconds, 0 = off</small>
-          <input type="number" name="hold_seconds" min="0" max="60"></label>
-        <div class="formactions">
-          <button type="button" class="btn" id="btnTryHold" data-needs-servo>Try it</button>
-          <button type="submit" class="btn primary">Save hold settings</button>
-        </div>
-      </form>
+      <div class="banner banner-warn">
+        <strong>Removed for safety.</strong> Holding the latch means keeping the
+        servo energised with nobody watching &mdash; a servo under torque cannot
+        be turned by hand, so a fault during the hold can trap someone on the
+        wrong side of the door. The firmware now releases torque at the end of
+        every move, so this can no longer be sustained. <em>Open</em> now simply
+        unlocks. If your door genuinely needs the latch held, say so and it can
+        come back as an explicitly time-bounded mode.
+      </div>
     </div>
 
     <div class="card" id="devCard">
