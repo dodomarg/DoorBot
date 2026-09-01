@@ -119,12 +119,14 @@ Because a multi-turn step count is not an angle, the interface reports the
 angle *within the current revolution* alongside a separate turn count, rather
 than showing you something like "527°".
 
-#### The servo is never left holding
+#### The servo is never left holding indefinitely
 
-DoorBot energises the servo only while a move is actually running, and releases
-it the moment the move ends. This is deliberate and non-negotiable: a servo
-holding position is a servo you cannot turn by hand, and on a door that means a
-firmware fault can trap someone on the wrong side.
+DoorBot energises the servo only while a move is actually running or a
+**time-bounded hold** is running, and releases it the moment either ends. This
+is deliberate and non-negotiable: a servo holding position is a servo you cannot
+turn by hand, and on a door that means a firmware fault can trap someone on the
+wrong side. There is no command anywhere in the system that energises the servo
+without an end time — the add-on refuses one outright.
 
 A watchdog in the firmware enforces it every loop. A move that overruns its
 energised budget is aborted and released; torque found on at rest is released
@@ -133,16 +135,32 @@ restarts, because `setup()` forces the release before it does anything else.
 Torque state lives in the servo's own register and survives an ESP32 reset, so
 the reboot alone would not clear it.
 
+That decision is a pure function in `esphome/components/feetech_servo/safety_policy.h`
+— no hardware, no globals, no clock of its own — so it can be compiled and
+exercised on a PC. `tests/safety_policy_test.cpp` drives it through the 49.7-day
+`millis()` rollover, a stopped clock, a clock running backwards and a corrupted
+deadline, and asserts that torque is always released and a hold never exceeds
+its ceiling:
+
+```bash
+g++ -std=c++17 -Wall -Wextra -o /tmp/safety_test tests/safety_policy_test.cpp && /tmp/safety_test
+```
+
+**Hold-open** works within this rule rather than around it. It drives past the
+unlocked point and holds there so a passive outside handle can push the door,
+but the hold is requested *as part of the move* (torque is dropped the instant a
+move ends, so a hold asked for afterwards would leave a gap for a spring latch),
+it is granted only if the move actually arrives, and the firmware clamps the
+duration to a **60 second** ceiling. Three independent mechanisms end it: the
+granted deadline, an elapsed-time ceiling that does not trust the deadline, and
+a loop counter that does not trust the clock.
+
 There is one honest limit. If the serial bus itself is dead, the firmware
 cannot transmit a release at all, and no amount of rebooting changes that — it
 would only cost you the logs, OTA and Home Assistant connection you need to
 diagnose the fault. In that case DoorBot reports a component error and keeps
 retrying. **Cutting power to the servo is the only complete mitigation**, so
 put it on a switched supply if the door is the only way out of a room.
-
-A consequence worth stating plainly: **hold-open was removed.** Holding a latch
-retracted so a passive outside handle can push the door requires exactly the
-sustained torque this policy forbids.
 
 The calibration is also stored on the ESP32 itself in `restore_value` number
 entities, so the lock keeps working if the add-on or Home Assistant is down.

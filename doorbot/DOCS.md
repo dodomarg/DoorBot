@@ -104,12 +104,14 @@ the output shaft. A mirrored mount or an extra gear reverses that. Tick **the
 thumbturn turns the opposite way to the arrows** and the jog arrows flip to
 match what you actually see.
 
-> **Hold-open has been removed.** It worked by keeping the servo energised past
-> the unlocked point so a passive outside handle could push the door. A servo
-> under torque cannot be turned by hand, so that is a servo capable of trapping
-> someone on the wrong side of a door. **Open** now simply unlocks. The
-> direction rules below still apply to the stored hold point, which is kept
-> only so the setting can be restored if a bounded version is ever added.
+> **Hold-open is time-bounded, and the firmware enforces the limit.** It works
+> by driving past the unlocked point and keeping the servo energised there so a
+> passive outside handle can push the door. A servo under torque cannot be
+> turned by hand, so that hold is never open-ended: you set a duration, and the
+> firmware refuses anything over **60 seconds**, releasing at the deadline even
+> if the add-on, Home Assistant or the network have gone away. The hold is only
+> granted if the move actually arrives -- a jam, stall or timeout releases
+> instead. The direction rules below apply to the stored hold point.
 
 There are also fine controls:
 

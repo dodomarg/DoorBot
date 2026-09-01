@@ -42,6 +42,11 @@ MIN_TRAVEL = 60
 MOVE_TOLERANCE = 25
 
 
+# Mirrors FeetechServo::MAX_HOLD_MS. The firmware enforces this independently;
+# this copy exists so the interface never offers a hold it cannot honour.
+MAX_HOLD_SECONDS = 60
+
+
 def raw_to_degrees(raw: int) -> float:
     """Angle within the current revolution, 0..359.9.
 
@@ -122,6 +127,20 @@ class BaseBackend:
     def stop(self) -> None:
         raise NotImplementedError
 
+    def hold_open(self, position: int, seconds: int, speed: int | None = None) -> None:
+        """Move to a position and hold it under torque for a bounded window.
+
+        Holding is folded into the move rather than issued after it: torque is
+        released the instant a move ends, so a hold requested afterwards would
+        let a spring-loaded latch snap back in the gap. The deadline belongs to
+        the firmware, which clamps it and releases even if we never ask.
+        """
+        raise NotImplementedError
+
+    def end_hold(self) -> None:
+        """Cut a running hold short and release."""
+        raise NotImplementedError
+
     def set_multi_turn(self, enabled: bool) -> None:
         """Widen or narrow the travel range. Mock backends model it locally."""
         return None
@@ -161,6 +180,10 @@ class MockBackend(BaseBackend):
         self._slipped = False
         self._on_goal_since = 0.0
         self._move_seq = 0
+        # Bounded hold, mirroring the firmware: armed with the move, started on
+        # arrival, and released by the deadline whatever the caller does.
+        self._pending_hold: float | None = None
+        self._hold_until: float | None = None
 
     @property
     def slip_next_hold(self) -> bool:
@@ -180,6 +203,19 @@ class MockBackend(BaseBackend):
         with self._lock:
             self._multi_turn = bool(enabled)
 
+    def hold_open(self, position: int, seconds: int, speed: int | None = None) -> None:
+        seconds = max(0, min(int(seconds), MAX_HOLD_SECONDS))
+        self.move_to(position, speed)
+        with self._lock:
+            self._pending_hold = float(seconds)
+
+    def end_hold(self) -> None:
+        with self._lock:
+            self._pending_hold = None
+            self._hold_until = None
+            self._torque = False
+            self._goal = self._position
+
     # ------------------------------------------------------------- internals
     def _tick(self) -> None:
         now = time.monotonic()
@@ -190,6 +226,12 @@ class MockBackend(BaseBackend):
 
         if not self._torque:
             self._load *= 0.5
+            # A servo that loses torque mid-move has stopped, and must say so.
+            # Leaving move_result on "moving" would strand every caller waiting
+            # for a terminal result until its timeout expired.
+            if self._move_result == "moving":
+                self._move_result = "aborted"
+                self._goal = self._position
             return
 
         # Goal velocity is in steps/second-ish; scale for realism.
@@ -217,6 +259,27 @@ class MockBackend(BaseBackend):
             self._load *= 0.6
             if self._move_result == "moving":
                 self._move_result = "arrived"
+            # Arrived: a hold armed with the move starts counting down now,
+            # exactly as the firmware applies it on arrival.
+            if self._pending_hold is not None:
+                self._hold_until = now + self._pending_hold
+                self._pending_hold = None
+            elif self._hold_until is None:
+                # Mirrors the firmware's safety policy: the move is over, so the
+                # servo lets go. Without this the simulator would quietly model
+                # a servo that holds forever - the exact behaviour the firmware
+                # exists to prevent, hidden from every test that uses the mock.
+                self._torque = False
+                self._goal = self._position
+
+        # The deadline is the mock's own, not the caller's. Whatever else
+        # happens, the simulated servo lets go when the window is up.
+        if self._hold_until is not None and now >= self._hold_until:
+            self._hold_until = None
+            self._torque = False
+            self._goal = self._position
+            self._load *= 0.5
+            return
 
         self._temperature = min(60.0, 30.0 + self._load / 60.0)
         self._voltage = 12.2 - self._load / 4000.0
@@ -271,6 +334,10 @@ class MockBackend(BaseBackend):
             self._tick()
             if speed:
                 self._speed = float(speed)
+            # A new move supersedes any hold still running; otherwise the old
+            # hold's deadline fires part-way through this move and cuts torque.
+            self._pending_hold = None
+            self._hold_until = None
             self._torque = True
             low, high = travel_limits(self._multi_turn)
             self._goal = float(max(low, min(high, int(position))))
@@ -385,6 +452,20 @@ class EsphomeBackend(BaseBackend):
     def stop(self) -> None:
         status = self.status()
         self.move_to(status["position"])
+
+    def hold_open(self, position: int, seconds: int, speed: int | None = None) -> None:
+        # One call, so the move and the hold are atomic in the firmware. The
+        # firmware clamps the window and owns the deadline: if this add-on dies
+        # mid-hold, the servo is still released on time.
+        self.hass.call_service(
+            "esphome",
+            "doorbot_hold_open",
+            position=int(position),
+            seconds=max(0, min(int(seconds), MAX_HOLD_SECONDS)),
+        )
+
+    def end_hold(self) -> None:
+        self.hass.call_service("esphome", "doorbot_end_hold")
 
     def set_multi_turn(self, enabled: bool) -> None:
         # The firmware owns the servo's EEPROM; ask it to re-apply the range.
@@ -548,15 +629,24 @@ class LockController:
             )
         return servo
 
-    def _drive(self, position: int, speed: int | None, actor: str) -> dict[str, Any]:
-        """Move to a position, wait for it to settle, and verify it got there."""
+    def _drive(
+        self, position: int, speed: int | None, actor: str, hold_seconds: int = 0
+    ) -> dict[str, Any]:
+        """Move to a position, wait for it to settle, and verify it got there.
+
+        With hold_seconds the move and the hold are issued as one command, so
+        the servo is never released between arriving and starting to hold.
+        """
         # Refuse to command a servo that is not answering. Without this the move
         # is sent into the void, and the drift check below then reports it as
         # "stopped N steps short", which blames the mechanism for what is really
         # a wiring, power or configuration fault.
         self._require_online(actor)
 
-        self.backend.move_to(position, speed)
+        if hold_seconds > 0:
+            self.backend.hold_open(position, hold_seconds, speed)
+        else:
+            self.backend.move_to(position, speed)
         servo = self._settle()
         result = servo.get("move_result", "")
         if not servo.get("online", True):
@@ -630,28 +720,97 @@ class LockController:
             return self._travel("unlocked_position", STATE_UNLOCKED, actor)
 
     def open(self, actor: str = "ui") -> dict[str, Any]:
-        """Unlock. The hold-open latch is retired -- see the note below.
+        """Unlock, then hold the latch retracted so the door can be pushed.
 
-        This used to drive past "unlocked" to a hold point and keep the servo
-        energised there so a passive outside handle could push the door. That
-        requires the one thing the safety policy forbids: sustained torque with
-        nobody watching. A servo holding the latch is a servo that cannot be
-        overridden by hand, and a fault during the hold strands the door.
+        Needed on doors whose outside handle is passive: turning the key back to
+        "unlocked" leaves the latch out, so the door still will not open. The
+        servo has to keep turning past that point and stay there.
 
-        The firmware now releases torque at the end of every move, so a hold
-        cannot be sustained anyway -- keeping this code would only produce a
-        control that reports success while doing nothing.
+        The hold is time-bounded and the bound is enforced in firmware, not
+        here. This loop waits it out and then drives back, but if this add-on
+        crashes mid-hold the servo is still released on schedule -- a hold is
+        the only moment DoorBot is energised at rest, so it is the one moment
+        that must not depend on software staying alive.
         """
         with self._lock:
+            self.unlock(actor=actor)
             cal = self.db.get_calibration()
-            if int(cal.get("hold_seconds") or 0) > 0:
+            seconds = int(cal.get("hold_seconds") or 0)
+            if seconds <= 0:
+                return self.status()
+            if seconds > MAX_HOLD_SECONDS:
+                seconds = MAX_HOLD_SECONDS
+
+            # unlock() already armed auto-lock, but the grace period should
+            # start when the latch is released, not when the hold begins.
+            self._cancel_auto_lock()
+
+            hold_at = int(cal.get("hold_position") or cal["unlocked_position"])
+            unlocked_at = int(cal["unlocked_position"])
+            speed = cal.get("speed")
+            self._hold_generation += 1
+            generation = self._hold_generation
+            try:
+                self._drive(hold_at, speed, actor, hold_seconds=seconds)
+            except BackendError:
+                # Never leave the latch part-way to the hold point.
+                self._release_latch(unlocked_at, speed, actor)
+                raise
+            self.db.log(
+                "hold_open",
+                f"Holding the latch at {hold_at} for {seconds}s "
+                f"(firmware releases it no later than {MAX_HOLD_SECONDS}s)",
+                actor=actor,
+                position=hold_at,
+                seconds=seconds,
+            )
+            self._emit("hold_open", {"actor": actor, "seconds": seconds})
+
+        # Deliberately outside the lock: a hold can last a minute, and blocking
+        # every status poll and the lock button for that long would be worse
+        # than useless - you could not cancel the hold you are stuck in.
+        slipped = False
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            if self._hold_generation != generation:
+                return self.status()  # a newer command took over
+            servo = self.backend.status()
+            if not servo.get("torque", True):
+                break  # the firmware's deadline fired; nothing left to wait for
+            if not servo.get("holding", True):
+                slipped = True
+                break
+
+        with self._lock:
+            if self._hold_generation != generation:
+                return self.status()
+            if slipped:
+                # Usually the servo's own overload protection cutting output
+                # after Protection time; the door may not have opened.
                 self.db.log(
-                    "hold_retired",
-                    "Hold-open is retired: the servo is never left holding "
-                    "torque. Unlocking normally instead.",
-                    actor=actor,
+                    "hold_slipped", "The latch slipped while being held", actor=actor
                 )
-        return self.unlock(actor=actor)
+                self._emit("hold_slipped", {"actor": actor})
+            self._release_latch(unlocked_at, speed, actor)
+            return self.status()
+
+    def _release_latch(self, unlocked_at: int, speed: int | None, actor: str) -> None:
+        """Return from the hold point. A lock must never fail latch-retracted."""
+        try:
+            self.backend.end_hold()
+        except (BackendError, NotImplementedError):
+            pass
+        try:
+            self._drive(unlocked_at, speed, actor)
+            self._state = STATE_UNLOCKED
+        except BackendError:
+            self.db.log(
+                "jammed",
+                "Could not release the latch after holding it open",
+                actor=actor,
+            )
+        self._schedule_auto_lock(self._state)
 
     def toggle(self, actor: str = "ui") -> dict[str, Any]:
         return self.lock(actor) if self._state != STATE_LOCKED else self.unlock(actor)
@@ -708,9 +867,23 @@ class LockController:
             return self.status()
 
     def set_torque(self, enabled: bool) -> dict[str, Any]:
+        """Release the servo. Enabling torque from here is refused.
+
+        Turning torque on with no deadline is the one thing that can clamp a
+        door shut. The firmware refuses it independently -- its watchdog drops
+        an unjustified energise within the grace period -- but refusing it here
+        too means the API never advertises something it cannot honour. A real,
+        time-bounded hold goes through open()/hold_open instead.
+        """
         with self._lock:
             self._require_online("ui")
-            self.backend.set_torque(enabled)
+            if enabled:
+                raise BackendError(
+                    "Holding position indefinitely is not allowed. The firmware "
+                    "releases an unbounded hold automatically; use Hold open for "
+                    "a hold with a time limit."
+                )
+            self.backend.set_torque(False)
             return self.status()
 
     def capture(self, which: str) -> dict[str, Any]:
@@ -797,6 +970,18 @@ class LockController:
             for key in ("invert", "multi_turn"):
                 if key in allowed:
                     allowed[key] = bool(allowed[key])
+            # Refuse rather than clamp: the firmware will only ever hold for
+            # MAX_HOLD_SECONDS, so storing a longer value would show a duration
+            # on this page that the servo is guaranteed not to honour.
+            if int(allowed.get("hold_seconds", 0)) > MAX_HOLD_SECONDS:
+                raise BackendError(
+                    f"A hold can last at most {MAX_HOLD_SECONDS} seconds. The "
+                    f"firmware enforces that limit itself and will release the "
+                    f"servo at it, so a longer setting here would be a duration "
+                    f"the lock never actually performs."
+                )
+            if int(allowed.get("hold_seconds", 0)) < 0:
+                raise BackendError("A hold cannot last a negative time.")
             cal = self.db.save_calibration(allowed)
             # A hold-open point on the wrong side of the unlocked position would
             # drive the bolt back out while reporting the door as held open, so

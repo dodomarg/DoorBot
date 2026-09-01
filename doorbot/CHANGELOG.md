@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.2.5
+
+- **Hold-open is back, but the firmware owns the deadline.** A hold is now
+  requested as part of a move (`hold_open`), not as a separate "energise now"
+  command, because torque is dropped the instant a move ends and a spring latch
+  would snap back in that gap. The hold is granted *only* if the move actually
+  arrives -- a jam, stall, timeout or abort releases instead of holding.
+- **The firmware refuses to hold longer than 60 s.** Any request above the
+  ceiling is clamped in the firmware, not in the UI or the add-on. The add-on
+  and the wizard also validate it, but they are a convenience, not the control.
+- **Removed the wizard's "Hold position" button.** It energised the servo with
+  no end time, which is exactly the state that can trap someone. The add-on now
+  refuses `set_torque(true)` outright (HTTP 409) so there is no path to an
+  indefinite hold from any client.
+- **The safety decision is now a pure function with its own test suite.** The
+  watchdog logic moved into `safety_policy.h` -- no hardware, no globals, no
+  clock of its own -- so it can be compiled and driven on a PC.
+  `tests/safety_policy_test.cpp` (27 checks) proves torque is always released
+  across the 49.7-day `millis()` rollover, with a stopped clock, with a clock
+  running backwards, and with a corrupted deadline.
+- **Three independent reasons a hold can end**, because trusting one value is
+  how a door stays clamped: the granted deadline (wrap-safe signed compare), an
+  elapsed-time ceiling measured from the hold's start that does not trust the
+  deadline, and a loop counter that does not trust the clock at all.
+- **Fixed three simulator bugs that were hiding the safety policy.** The mock
+  never released torque after a move, so every mock-based test was modelling a
+  servo that holds forever; a new move did not cancel a running hold, so the old
+  deadline cut torque mid-move; and torque dropping mid-move froze the mock at
+  `moving` instead of reporting `aborted`.
+- **Fixed: "Open" was not actually holding anything.** The `open_door` script
+  still used the pre-0.2.4 approach -- an ordinary move followed by a YAML
+  `delay`. Since every move now releases torque on arrival, that "hold" dropped
+  the latch immediately and then waited out the delay doing nothing. It now
+  calls the firmware's bounded hold, so the deadline survives the script being
+  stopped, the add-on dying or Home Assistant going away.
+- **Fixed: two warnings that fired on every single operation.** The post-move
+  check asked "is the servo holding?", which is false by design after a normal
+  move, so every lock and unlock logged *"Servo is not holding"*; and the
+  hold check fired *"The latch slipped during the hold"* plus a
+  `doorbot_hold_slipped` event every time. Constant false alarms are how a real
+  one gets ignored. The post-move check now verifies the move *arrived*, and
+  slip detection runs during the hold, when it can actually mean something.
+- **Fixed: "Holding position" turned on for unsanctioned torque.** It was
+  derived from raw torque, so a servo left energised by a fault -- exactly what
+  the watchdog exists to clear -- reported as a legitimate hold. It now requires
+  an active bounded hold, so an automation can tell the two apart.
+- **A hold ending normally no longer logs a warning.** It shared the watchdog's
+  anomaly wording, which would have taught you to ignore the message that
+  matters.
+
 ## 0.2.4
 
 - **The servo is never left holding torque.** A servo under torque cannot be

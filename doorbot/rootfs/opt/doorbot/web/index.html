@@ -109,10 +109,14 @@
       <ol class="steps">
         <li>
           <h3>1. Release the servo</h3>
-          <p>Turn torque off so you can move the thumbturn freely by hand.</p>
+          <p>
+            Turn torque off so you can move the thumbturn freely by hand.
+            There is deliberately no &ldquo;hold&rdquo; button here: the firmware
+            refuses to keep the servo energised without a time limit, so the
+            control would not work even if it existed.
+          </p>
           <div class="row">
             <button class="btn" id="btnTorqueOff" data-needs-servo>Release servo</button>
-            <button class="btn" id="btnTorqueOn" data-needs-servo>Hold position</button>
           </div>
         </li>
         <li>
@@ -210,20 +214,31 @@
     </div>
 
     <div class="card">
-      <h2>Hold open <span class="dirbadge bad">retired</span></h2>
+      <h2>Hold open</h2>
       <p class="muted">
-        This used to drive past the unlocked point and hold the latch retracted
-        so a passive outside handle could push the door open.
+        Some doors have a passive outside handle: turning the key back leaves the
+        latch out, so the door still will not push open. Here DoorBot keeps
+        turning past the unlocked point and holds the latch back for a moment.
+        Leave the duration at 0 if your handle retracts the latch itself.
       </p>
       <div class="banner banner-warn">
-        <strong>Removed for safety.</strong> Holding the latch means keeping the
-        servo energised with nobody watching &mdash; a servo under torque cannot
-        be turned by hand, so a fault during the hold can trap someone on the
-        wrong side of the door. The firmware now releases torque at the end of
-        every move, so this can no longer be sustained. <em>Open</em> now simply
-        unlocks. If your door genuinely needs the latch held, say so and it can
-        come back as an explicitly time-bounded mode.
+        <strong>This is the only time the servo is held.</strong> The time limit
+        is enforced by the firmware, not by this page &mdash; it is capped at 60
+        seconds, the deadline is set when the hold starts, and the servo is
+        released when it expires even if Home Assistant, this add-on or the
+        network has gone away in the meantime. There is no way to ask for a hold
+        without an end.
       </div>
+      <form id="holdForm" class="grid">
+        <label>Hold position <small id="holdRange">where the latch is fully retracted</small>
+          <input type="number" name="hold_position" min="0" max="4095"></label>
+        <label>Hold for <small>seconds, 0 = off, 60 max</small>
+          <input type="number" name="hold_seconds" min="0" max="60"></label>
+        <div class="formactions">
+          <button type="button" class="btn" id="btnTryHold" data-needs-servo>Try it</button>
+          <button type="submit" class="btn primary">Save hold settings</button>
+        </div>
+      </form>
     </div>
 
     <div class="card" id="devCard">

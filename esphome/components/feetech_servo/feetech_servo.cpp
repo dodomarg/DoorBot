@@ -350,16 +350,30 @@ bool FeetechServo::ping() { return this->send_and_receive_(STS_INST_PING, nullpt
 optional<uint8_t> FeetechServo::read_status() { return this->read_register_u8(STS_REG_STATUS); }
 
 void FeetechServo::set_torque(bool enabled) {
-  if (enabled)
+  if (enabled) {
     this->torque_since_ = millis();
+    this->energised_loops_ = 0;
+    // Deliberate: enabling torque directly does NOT grant a hold. The safety
+    // policy sees torque on with nothing justifying it and releases within the
+    // grace period. Holding a lock indefinitely is refused here, in firmware,
+    // so removing the button that used to do it is not the only thing standing
+    // between a user and a clamped door.
+    ESP_LOGW(TAG,
+             "Torque enabled without a bounded hold - the safety watchdog will "
+             "release it in about %u ms. Use hold_open for a real hold.",
+             (unsigned) this->release_grace_ms_);
+  }
   if (this->write_register_u8(STS_REG_TORQUE_ENABLE, enabled ? STS_TORQUE_ON : STS_TORQUE_OFF)) {
     ESP_LOGD(TAG, "Torque %s", enabled ? "enabled" : "released");
   } else {
     ESP_LOGW(TAG, "Torque %s was not acknowledged", enabled ? "enable" : "release");
   }
   this->torque_on_ = enabled;
-  if (!enabled)
+  if (!enabled) {
+    this->hold_active_ = false;
+    this->hold_until_ = 0;
     this->publish_holding_(false);
+  }
 }
 
 optional<bool> FeetechServo::read_torque_enabled() {
@@ -414,6 +428,11 @@ void FeetechServo::start_move(int32_t position, int speed, int acceleration) {
              this->multi_turn_ ? "multi-turn" : "single-turn", (int) clamped);
   }
   position = clamped;
+  // A new move supersedes any hold still running; the hold must not outlive
+  // the position it was granted for.
+  this->hold_active_ = false;
+  this->hold_until_ = 0;
+  this->pending_hold_ms_ = 0;
   this->move_to(position, speed, acceleration);
 
   this->move_mode_ = MoveMode::GOTO;
@@ -425,6 +444,31 @@ void FeetechServo::start_move(int32_t position, int speed, int acceleration) {
   this->move_result_ = MoveResult::MOVING;
   this->publish_result_();
   ESP_LOGD(TAG, "Move to %d started", (int) position);
+}
+
+void FeetechServo::start_hold_move(int32_t position, uint32_t hold_ms, int speed) {
+  if (hold_ms > MAX_HOLD_MS) {
+    ESP_LOGW(TAG, "Hold of %u ms exceeds the %u ms ceiling, clamped", (unsigned) hold_ms,
+             (unsigned) MAX_HOLD_MS);
+    hold_ms = MAX_HOLD_MS;
+  }
+  // Cancel any hold still running so a second request cannot extend the first
+  // one indefinitely by stacking windows.
+  this->hold_active_ = false;
+  this->hold_until_ = 0;
+  this->start_move(position, speed);
+  // Armed after start_move(), which resets move state; applied on arrival only.
+  this->pending_hold_ms_ = hold_ms;
+}
+
+void FeetechServo::end_hold() {
+  if (!this->hold_active_ && this->hold_until_ == 0)
+    return;
+  this->hold_active_ = false;
+  this->hold_until_ = 0;
+  ESP_LOGI(TAG, "Hold ended on request - releasing");
+  if (!this->release_torque_now_())
+    ESP_LOGE(TAG, "Could not release torque ending the hold - the watchdog will retry");
 }
 
 void FeetechServo::start_seek_stall(int direction, int load_threshold, int32_t max_steps, int speed) {
@@ -480,6 +524,24 @@ void FeetechServo::finish_move_(MoveResult result) {
     ESP_LOGW(TAG, "Move ended as %s at %d (goal %d, load %d)", move_result_to_string(result),
              (int) this->position_, (int) this->goal_, this->load_);
   }
+  // A hold is only ever granted by a move that actually arrived. Any other
+  // outcome - jam, timeout, stall, abort - drops it: those are exactly the
+  // cases where the door must be left free.
+  const uint32_t hold_ms = this->pending_hold_ms_;
+  this->pending_hold_ms_ = 0;
+  if (result == MoveResult::ARRIVED && hold_ms > 0) {
+    const uint32_t granted_at = millis();
+    this->hold_active_ = true;
+    this->hold_started_ = granted_at;
+    this->hold_until_ = granted_at + hold_ms;
+    this->torque_since_ = granted_at;
+    this->energised_loops_ = 0;
+    ESP_LOGI(TAG, "Holding %d for %u ms, then releasing", (int) this->position_,
+             (unsigned) hold_ms);
+    this->verify_holding();
+    return;
+  }
+
   // SAFETY: the move is over, so the servo must stop resisting the thumbturn.
   // This is the normal release path; enforce_safe_state_() is the backstop for
   // when it fails.
@@ -498,6 +560,8 @@ bool FeetechServo::release_torque_now_() {
   this->torque_on_ = (*now_off != STS_TORQUE_OFF);
   if (this->torque_on_)
     return false;
+  this->hold_active_ = false;
+  this->hold_until_ = 0;
   this->publish_holding_(false);
   return true;
 }
@@ -505,15 +569,63 @@ bool FeetechServo::release_torque_now_() {
 void FeetechServo::enforce_safe_state_() {
   const uint32_t now = millis();
 
-  if (this->move_result_ == MoveResult::MOVING) {
-    // A move that overruns its energised budget is aborted rather than allowed
-    // to keep pushing. finish_move_() releases on the way out.
-    if (now - this->torque_since_ > this->max_energised_ms_) {
-      ESP_LOGE(TAG, "Move exceeded the %u ms energised limit - aborting and releasing",
-               (unsigned) this->max_energised_ms_);
+  // Track loops spent energised so a stopped clock cannot silently disable
+  // every deadline below. Reset whenever nothing is energised.
+  if (this->torque_on_ || this->move_result_ == MoveResult::MOVING) {
+    if (this->energised_loops_ < UINT32_MAX)
+      this->energised_loops_++;
+  } else {
+    this->energised_loops_ = 0;
+  }
+
+  SafetyState st{};
+  st.now = now;
+  st.moving = this->move_result_ == MoveResult::MOVING;
+  st.torque_on = this->torque_on_;
+  st.torque_since = this->torque_since_;
+  st.hold_active = this->hold_active_;
+  st.hold_until = this->hold_until_;
+  st.hold_started = this->hold_started_;
+  st.energised_loops = this->energised_loops_;
+
+  const SafetyLimits limits{this->max_energised_ms_, this->release_grace_ms_,
+                            FeetechServo::MAX_HOLD_MS, FeetechServo::STUCK_CLOCK_LOOPS};
+
+  // The decision itself lives in safety_policy.h as a pure function so it can
+  // be exercised on a host through millis() rollover, a corrupted deadline, a
+  // clock stepped backwards and a clock that has stopped. See
+  // tests/safety_policy_test.cpp.
+  const SafetyAction action = evaluate_safety(st, limits);
+
+  // A hold reaching its deadline is the system working exactly as designed, so
+  // it must not share the anomaly wording used when torque is found on with no
+  // justification. Logging both the same way teaches you to ignore the one
+  // that means something.
+  bool planned_release = false;
+
+  switch (action) {
+    case SafetyAction::NONE:
+      if (!this->torque_on_ && !st.moving) {
+        this->release_failures_ = 0;
+        this->status_clear_error();
+      }
+      return;
+
+    case SafetyAction::ABORT_MOVE:
+      ESP_LOGE(TAG, "Move exceeded its energised budget - aborting and releasing");
+      this->pending_hold_ms_ = 0;  // a move that failed never earns a hold
       this->finish_move_(MoveResult::TIMEOUT);
-    }
-    return;
+      return;
+
+    case SafetyAction::RELEASE_HOLD_EXPIRED:
+      this->hold_active_ = false;
+      this->hold_until_ = 0;
+      ESP_LOGI(TAG, "Hold window ended - releasing");
+      planned_release = true;
+      break;  // fall through to the release path
+
+    case SafetyAction::RELEASE_AT_REST:
+      break;  // fall through to the release path
   }
 
   if (!this->torque_on_) {
@@ -522,16 +634,18 @@ void FeetechServo::enforce_safe_state_() {
     return;
   }
 
-  // Torque is on with no move running. Give a just-finished move a moment for
-  // its own release to land, then take over.
-  if (now - this->torque_since_ < this->release_grace_ms_)
-    return;
-  if (now - this->release_retry_at_ < 250)
+  // Rate-limit the retries so a servo that will not answer does not flood the
+  // bus. A planned release is a single expected event, so it goes out at once.
+  if (!planned_release && now - this->release_retry_at_ < 250)
     return;
   this->release_retry_at_ = now;
 
   if (this->release_torque_now_()) {
-    ESP_LOGW(TAG, "Watchdog released a servo that was left energised at rest");
+    if (planned_release) {
+      ESP_LOGI(TAG, "Hold released, servo free to turn by hand");
+    } else {
+      ESP_LOGW(TAG, "Watchdog released a servo that was left energised at rest");
+    }
     this->release_failures_ = 0;
     this->status_clear_error();
     return;
@@ -591,7 +705,11 @@ bool FeetechServo::verify_holding() {
   const bool on_target =
       this->position_ >= 0 && abs(this->position_ - this->goal_) <= static_cast<int32_t>(this->tolerance_);
   const bool overloaded = (this->last_error_ & (STS_ERR_OVERLOAD | STS_ERR_CURRENT)) != 0;
-  const bool holding = *torque && on_target && !overloaded;
+  // "Holding" means a sanctioned, time-bounded hold is running - not merely
+  // that the servo happens to be energised. Torque without an active hold is
+  // the fault the watchdog exists to clear, and reporting it as a hold would
+  // leave an automation unable to tell the two apart.
+  const bool holding = *torque && this->hold_active_ && on_target && !overloaded;
   this->publish_holding_(holding);
   return holding;
 }

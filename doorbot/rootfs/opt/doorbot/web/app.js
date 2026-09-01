@@ -139,6 +139,7 @@ function renderStatus(status) {
   $('#pillUnlocked').classList.toggle('set', !!status.calibrated);
 
   if (!$('#calForm').dataset.dirty) fillForm($('#calForm'), cal);
+  if (!$('#holdForm').dataset.dirty) fillForm($('#holdForm'), cal);
   renderDirection(status);
   $('#devCard').hidden = status.backend !== 'mock';
 
@@ -419,8 +420,6 @@ function bindEvents() {
 
   $('#btnTorqueOff').onclick = () => run(async () =>
     renderStatus(await api('calibration/torque', { method: 'POST', body: { enabled: false } })), 'Servo released');
-  $('#btnTorqueOn').onclick = () => run(async () =>
-    renderStatus(await api('calibration/torque', { method: 'POST', body: { enabled: true } })), 'Holding position');
 
   $$('[data-jog]').forEach((btn) => {
     btn.onclick = () => run(async () =>
@@ -448,6 +447,20 @@ function bindEvents() {
       renderStatus(status);
     }, 'Settings saved');
   };
+
+  const holdForm = $('#holdForm');
+  holdForm.oninput = () => { holdForm.dataset.dirty = '1'; };
+  holdForm.onsubmit = (ev) => {
+    ev.preventDefault();
+    run(async () => {
+      const status = await api('calibration', { method: 'POST', body: readForm(holdForm) });
+      delete holdForm.dataset.dirty;
+      renderStatus(status);
+    }, 'Hold settings saved');
+  };
+  $('#btnTryHold').onclick = () =>
+    run(async () => renderStatus(await api('open', { method: 'POST' })),
+      'Unlocked and held the latch');
 
   $('#btnSwapDir').onclick = () =>
     run(async () => renderStatus(await api('calibration/swap', { method: 'POST' })),

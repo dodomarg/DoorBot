@@ -122,6 +122,19 @@ api:
     - action: recenter_servo
       then:
         - lambda: 'id(bolt)->recenter_here();'
+    # Drive to a position and hold it under torque for a bounded window, for
+    # doors whose outside handle does not retract the latch. The firmware
+    # clamps the window and owns the deadline, so a caller that dies mid-hold
+    # cannot leave the door clamped.
+    - action: hold_open
+      variables:
+        position: int
+        seconds: int
+      then:
+        - lambda: 'id(bolt)->start_hold_move((int32_t) position, (uint32_t) (seconds * 1000), (int) id(move_speed).state);'
+    - action: end_hold
+      then:
+        - lambda: 'id(bolt)->end_hold();'
 
 ota:
   - platform: esphome
@@ -547,9 +560,12 @@ lock:
         return LOCK_STATE_UNLOCKED;
       return {};
     lock_action:
-      # Stop any hold in progress first: otherwise its delay would expire after
-      # this lock completes and drive the bolt straight back to unlocked.
+      # Stop any hold in progress first, and end it in the firmware too. The
+      # travel_to move would clear the hold anyway (start_move always does),
+      # but dropping torque before commanding a new move is the order that
+      # never leaves the bolt fighting a hold it no longer owns.
       - script.stop: open_door
+      - lambda: 'id(bolt)->end_hold();'
       - script.execute:
           id: travel_to
           target: !lambda 'return (int32_t) id(locked_position).state;'
@@ -557,6 +573,7 @@ lock:
       - script.wait: travel_to
     unlock_action:
       - script.stop: open_door
+      - lambda: 'id(bolt)->end_hold();'
       - script.execute:
           id: travel_to
           target: !lambda 'return (int32_t) id(unlocked_position).state;'
@@ -628,11 +645,15 @@ script:
                 condition:
                   lambda: 'return !id(bolt)->move_busy();'
                 timeout: 20s
-      # Confirm the servo is genuinely holding where we left it, rather than
-      # having quietly dropped torque or tripped its overload protection.
+      # Confirm the move actually landed. It must NOT ask verify_holding()
+      # here: since 0.2.4 every move releases torque on arrival, so "is it
+      # holding?" is false by design after a normal move, and asking it would
+      # log a warning on every single lock and unlock.
       - lambda: |-
-          if (!id(bolt)->verify_holding())
-            ESP_LOGW("doorbot", "Servo is not holding %d after the move", (int) target);
+          if (!id(bolt)->last_move_ok())
+            ESP_LOGW("doorbot", "Servo did not reach %d (%s at %d)", (int) target,
+                     esphome::feetech_servo::move_result_to_string(id(bolt)->move_result()),
+                     (int) id(bolt)->position());
 
   # Unlock, then keep turning past the unlocked point to pull the latch back and
   # hold it there, so a door with no working outside handle can be pushed open.
@@ -653,10 +674,18 @@ script:
           condition:
             lambda: 'return id(hold_active) > 0;'
           then:
+            # Hand the hold to the firmware rather than driving there and
+            # sitting in a YAML delay. A plain start_move() releases torque the
+            # moment it arrives, so the old delay held nothing at all; and a
+            # script-owned window would keep the door clamped if this script
+            # died mid-hold. start_hold_move() clamps to the firmware ceiling
+            # and releases on its own deadline no matter what happens up here.
             - lambda: |-
                 ESP_LOGI("doorbot", "Holding the latch at %d for %d s",
                          (int) id(hold_position).state, id(hold_active));
-                id(bolt)->start_move((int32_t) id(hold_position).state, (int) id(move_speed).state);
+                id(bolt)->start_hold_move((int32_t) id(hold_position).state,
+                                          ((uint32_t) id(hold_active)) * 1000,
+                                          (int) id(move_speed).state);
             - wait_until:
                 condition:
                   lambda: 'return !id(bolt)->move_busy();'
@@ -665,25 +694,37 @@ script:
                 condition:
                   lambda: 'return !id(bolt)->last_move_ok();'
                 then:
+                  # The hold is only granted on arrival, so a failed move here
+                  # means there is no hold to wait out.
                   - script.execute:
                       id: report_failure
                       stage: "hold"
-            - homeassistant.event:
-                event: esphome.doorbot_holding_open
-            # Wait out the hold, then check the servo actually kept its grip.
-            # Overload protection cuts output to "Protective torque" after
-            # "Protection time", which is the usual reason a hold slips.
-            - delay: !lambda 'return ((uint32_t) id(hold_active)) * 1000;'
-            - if:
-                condition:
-                  lambda: 'return !id(bolt)->verify_holding();'
-                then:
-                  - logger.log:
-                      level: WARN
-                      format: "The latch slipped during the hold (position %d, load %d)"
-                      args: ['(int) id(bolt)->position()', 'id(bolt)->load()']
+                else:
                   - homeassistant.event:
-                      event: esphome.doorbot_hold_slipped
+                      event: esphome.doorbot_holding_open
+                  # Wait out the firmware's window, watching for a slip.
+                  # Overload protection cuts output to "Protective torque"
+                  # after "Protection time", which is the usual cause. This
+                  # loop always terminates: the firmware guarantees the hold
+                  # ends within its ceiling even if nothing up here runs.
+                  - while:
+                      condition:
+                        lambda: 'return id(bolt)->hold_active();'
+                      then:
+                        - delay: 1s
+                        - if:
+                            condition:
+                              lambda: 'return id(bolt)->hold_active() && !id(bolt)->verify_holding();'
+                            then:
+                              - logger.log:
+                                  level: WARN
+                                  format: "The latch slipped during the hold (position %d, load %d)"
+                                  args: ['(int) id(bolt)->position()', 'id(bolt)->load()']
+                              - homeassistant.event:
+                                  event: esphome.doorbot_hold_slipped
+                              - lambda: 'id(bolt)->end_hold();'
+            # Belt and braces: never leave this script with a hold running.
+            - lambda: 'id(bolt)->end_hold();'
             # Return to the plain unlocked position so the latch can drop.
             - lambda: 'id(bolt)->start_move((int32_t) id(unlocked_position).state, (int) id(move_speed).state);'
             - wait_until:

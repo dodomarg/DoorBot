@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "safety_policy.h"
 #include "esphome/core/optional.h"
 #include "esphome/components/uart/uart.h"
 #ifdef USE_SENSOR
@@ -166,6 +167,16 @@ class FeetechServo : public PollingComponent, public uart::UARTDevice {
   /// Begin a closed-loop move. Non-blocking: poll move_result() or wait for
   /// move_busy() to go false. Supersedes any move already running.
   void start_move(int32_t position, int speed = -1, int acceleration = -1);
+  /// Move, then hold that position under torque for hold_ms before releasing.
+  /// The hold is applied only if the move actually arrives, and is clamped to
+  /// MAX_HOLD_MS -- the deadline belongs to the safety watchdog, not to the
+  /// caller. Holding is folded into the move because torque is released the
+  /// instant a move ends; asking for a hold afterwards would let a spring-loaded
+  /// latch snap back in the gap.
+  void start_hold_move(int32_t position, uint32_t hold_ms, int speed = -1);
+  /// Ends any running hold and releases. Safe to call when nothing is held.
+  void end_hold();
+  bool hold_active() const { return this->hold_active_; }
   /// Begin driving slowly in `direction` until the servo stalls, then stop.
   void start_seek_stall(int direction, int load_threshold, int32_t max_steps, int speed = -1);
   /// Stop where we are, keeping torque on so the position is still held.
@@ -252,11 +263,13 @@ class FeetechServo : public PollingComponent, public uart::UARTDevice {
   void publish_holding_(bool holding);
   int32_t clamp_target_(int32_t position) const;
 
-  /// SAFETY: a lock must never be left energised. A servo holding position is a
-  /// servo a person cannot turn by hand, which on a door means somebody can be
-  /// shut in or shut out by a firmware fault. The invariant enforced here is
-  /// that torque is only ever on while a move is actually in progress; at any
-  /// other moment it is released. Called on every loop, not just during moves.
+  /// SAFETY: a lock must never be left energised *indefinitely*. A servo
+  /// holding position is a servo a person cannot turn by hand, which on a door
+  /// means somebody can be shut in or shut out by a firmware fault. The
+  /// invariant enforced here is that torque is only ever on while a move is in
+  /// progress or while an explicitly time-bounded hold is running; at any other
+  /// moment it is released. Every energised period has a deadline this function
+  /// owns -- never the caller. Called on every loop, not just during moves.
   void enforce_safe_state_();
 
   /// Writes torque off and confirms it by reading the register back. Returns
@@ -290,6 +303,25 @@ class FeetechServo : public PollingComponent, public uart::UARTDevice {
   static const uint8_t MAX_RELEASE_FAILURES = 5;
   uint32_t torque_since_{0};
   uint32_t release_retry_at_{0};
+
+  /// Deadline of an explicitly granted hold, in millis(). 0 means no hold is
+  /// running and torque at rest is a violation. Set only via finish_move_()
+  /// completing a hold move, and always clamped to MAX_HOLD_MS.
+  uint32_t hold_until_{0};
+  bool hold_active_{false};
+  /// Requested hold for the move currently running, in ms. Applied when (and
+  /// only when) that move actually arrives.
+  uint32_t pending_hold_ms_{0};
+  /// Absolute ceiling on any hold. Nothing may ask for longer, so a bad value
+  /// upstream cannot turn into an indefinite clamp on the door.
+  static const uint32_t MAX_HOLD_MS = 60000;
+  /// millis() when the current hold began, kept separately from hold_until_ so
+  /// the elapsed-time ceiling does not have to trust the deadline value.
+  uint32_t hold_started_{0};
+  /// Loops spent energised. A clock that never advances would disable every
+  /// time-based deadline; this is the escape hatch that does not trust it.
+  uint32_t energised_loops_{0};
+  static const uint32_t STUCK_CLOCK_LOOPS = 10000;
 
   /// Multi-turn unwrapping state.
   int32_t raw_position_last_{0};

@@ -197,48 +197,115 @@ s=call("status", method="GET")
 ok("single-turn clamps to one revolution", s["servo"]["position"] <= 4095)
 
 # --- holding verification ---
+# The contract: torque is on while a move runs or a bounded hold runs, and at
+# no other time. A plain move must therefore leave the servo released.
 call("calibration", {"multi_turn": False})
-call("calibration/torque", {"enabled": True})
 call("calibration/goto", {"position": 2000}); time.sleep(0.5)
 s=call("status", method="GET")
-ok("servo reports holding", s["servo"]["holding"] is True)
 ok("move result reported", s["servo"]["move_result"] == "arrived")
-s=call("calibration/torque", {"enabled": False}); time.sleep(0.05)
-s=call("status", method="GET")
-ok("not holding once torque is released", s["servo"]["holding"] is False)
-call("calibration/torque", {"enabled": True})
+ok("a finished move leaves the servo released", s["servo"]["torque"] is False)
+ok("and therefore not holding", s["servo"]["holding"] is False)
 
-# --- hold open is retired (never leave the servo under torque) ---
-# Re-establish a known calibration, then configure a hold and prove it is ignored.
+# During a granted hold, and only then, it really is holding. Capture a fresh
+# calibration first: a hold point is only accepted past the unlocked end in the
+# unlocking direction, so it has to be derived from the real end points.
 call("calibration/goto", {"position": 2400}); time.sleep(0.4)
 call("calibration/capture", {"which":"locked"})
 call("calibration/goto", {"position": 1500}); time.sleep(0.4)
 call("calibration/capture", {"which":"unlocked"})
-s=call("calibration", {"hold_position": 1100, "hold_seconds": 2, "overshoot": 0})
-ok("hold settings still stored", s["calibration"]["hold_seconds"]==2)
+_cal=call("status", method="GET")["calibration"]
+_hold=int(_cal["unlocked_position"] - (_cal["locked_position"] - _cal["unlocked_position"]) * 0.4)
+_r=call("calibration", {"hold_position": _hold, "hold_seconds": 3})
+ok("a hold point past unlocked is accepted for the holding test",
+   _r.get("HTTP") is None and int(_r["calibration"]["hold_seconds"])==3)
+_hres={}
+_ht=threading.Thread(target=lambda: _hres.update(r=call("open")))
+_ht.start(); time.sleep(1.5)
+s=call("status", method="GET")
+ok("servo reports holding during a bounded hold", s["servo"]["holding"] is True)
+ok("torque is on during a bounded hold", s["servo"]["torque"] is True)
+_ht.join(); time.sleep(0.5)
+s=call("status", method="GET")
+ok("released once the hold window ends", s["servo"]["torque"] is False)
+call("calibration", {"hold_seconds": 0})
 
-call("lock"); time.sleep(0.6)
+# --- hold open, and the fact that it is bounded ---
+# Re-establish a known calibration, then park a hold point past the unlocked end.
+call("calibration/goto", {"position": 2400}); time.sleep(0.4)
+call("calibration/capture", {"which":"locked"})
+call("calibration/goto", {"position": 1500}); time.sleep(0.4)
+call("calibration/capture", {"which":"unlocked"})
+s=call("calibration", {"hold_position": 1100, "hold_seconds": 1, "overshoot": 0})
+ok("hold settings saved", s["calibration"]["hold_seconds"]==1)
+
 t0=time.time()
 s=call("open")
 elapsed=time.time()-t0
-# The whole point: a configured hold must NOT keep the servo energised.
-ok("open no longer holds the latch", elapsed < 1.5)
-ok("open still unlocks", s["state"]=="unlocked")
-ok("parked at the unlocked point, not the hold point",
+ok("open held the latch then returned", elapsed >= 1.0)
+ok("ended unlocked", s["state"]=="unlocked")
+ok("back at the unlocked point",
    abs(s["servo"]["position"] - s["calibration"]["unlocked_position"]) <= 25)
-ok("not left at the hold position",
-   abs(s["servo"]["position"] - s["calibration"]["hold_position"]) > 25)
 evts=[e["kind"] for e in call("events", method="GET").get("events", [])]
-ok("retirement is logged, not silent", "hold_retired" in evts)
-ok("no hold was performed", "hold_open" not in evts)
+ok("hold logged", "hold_open" in evts)
 
-# A jam during open must still surface as an error rather than a silent success.
+# The hold must end on its own deadline, not because someone asked it to. This
+# is the property that keeps a crashed add-on from clamping the door.
+call("lock"); time.sleep(0.6)
+call("calibration", {"hold_seconds": 1})
+call("open")
+time.sleep(0.3)
+s=call("status", method="GET")
+ok("the servo is not left energised after a hold", s["servo"]["torque"] is False)
+
+# Torque may never be held open-endedly, whoever asks. This is the old wizard
+# "Hold position" button; the firmware refuses it too, independently.
+r=call("calibration/torque", {"enabled": True})
+ok("an indefinite hold is refused", r.get("HTTP")==409)
+ok("the refusal explains itself", "time limit" in str(r.get("error","")).lower())
+s=call("status", method="GET")
+ok("and the servo stayed released", s["servo"]["torque"] is False)
+ok("releasing is still allowed", call("calibration/torque", {"enabled": False}).get("HTTP") is None)
+
+# A hold longer than the ceiling is clamped rather than honoured.
+s=call("calibration", {"hold_seconds": 999})
+ok("an over-long hold is refused or clamped",
+   s.get("HTTP")==400 or int(s.get("calibration",{}).get("hold_seconds",0)) <= 60)
+
+# A slip during the hold must be reported, and the latch must still be released.
+call("calibration", {"hold_seconds": 2})
+call("lock"); time.sleep(0.6)
+call("dev/slip", {"enabled": True})
+s=call("open")
+ok("slip reported", "hold_slipped" in
+   [e["kind"] for e in call("events", method="GET").get("events", [])])
+ok("latch released after a slip",
+   abs(s["servo"]["position"] - s["calibration"]["unlocked_position"]) <= 25)
+ok("still ends unlocked after a slip", s["state"]=="unlocked")
+
+# Fail secure: if the hold move itself jams, the latch must not stay retracted.
 call("lock"); time.sleep(0.6)
 call("dev/jam", {"enabled": True})
 j=call("open")
 call("dev/jam", {"enabled": False})
 ok("a jam during open is reported", j.get("HTTP")==409)
 time.sleep(0.6)
+s=call("status", method="GET")
+ok("not left at the hold position",
+   abs(s["servo"]["position"] - s["calibration"]["hold_position"]) > 25)
+
+# The status API must stay responsive while a hold is running, and a lock
+# issued mid-hold must win rather than being undone when the hold expires.
+call("calibration", {"hold_seconds": 3})
+call("lock"); time.sleep(0.6)
+_res={}
+_t=threading.Thread(target=lambda: _res.update(open=call("open")))
+_t.start(); time.sleep(1.2)
+t0=time.time(); call("status", method="GET"); poll=time.time()-t0
+ok("status stays responsive during a hold", poll < 0.5)
+call("lock"); _t.join(); time.sleep(0.8)
+s=call("status", method="GET")
+ok("lock during a hold wins", s["state"]=="locked")
+call("calibration", {"hold_seconds": 0})
 
 # With no hold configured, open() is just an unlock and returns promptly.
 call("calibration", {"hold_seconds": 0})
@@ -246,6 +313,7 @@ call("lock"); time.sleep(0.4)
 t0=time.time(); baseline=call("unlock"); plain=time.time()-t0
 call("lock"); time.sleep(0.4)
 t0=time.time(); s=call("open"); elapsed=time.time()-t0
+# Same work as an unlock: no extra hold, no second trip back.
 ok("open without hold is a plain unlock",
    s["state"]=="unlocked" and baseline["state"]=="unlocked" and elapsed < plain + 0.5)
 
