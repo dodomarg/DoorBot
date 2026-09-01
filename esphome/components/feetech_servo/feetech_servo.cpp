@@ -1,12 +1,12 @@
-#include "sts3215.h"
+#include "feetech_servo.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
 namespace esphome {
-namespace sts3215 {
+namespace feetech_servo {
 
-static const char *const TAG = "sts3215";
+static const char *const TAG = "feetech_servo";
 
 const char *move_result_to_string(MoveResult result) {
   switch (result) {
@@ -27,6 +27,27 @@ const char *move_result_to_string(MoveResult result) {
   }
   return "unknown";
 }
+
+const char *model_number_to_string(uint16_t model) {
+  switch (model) {
+    case STS_MODEL_STS3215:
+      // Waveshare sells this as ST3215; Feetech's own part number is STS3215.
+      // The ST3235 shares the control table but reports a different number, so
+      // it falls through to the unknown case below until one is confirmed
+      // against real hardware.
+      return "ST3215 / STS3215";
+    case STS_MODEL_STS3250:
+      return "STS3250";
+    case STS_MODEL_SM8512BL:
+      return "SM8512BL";
+    case SCS_MODEL_SCS0009:
+      return "SCS0009";
+    default:
+      return "unknown";
+  }
+}
+
+bool model_is_scs_series(uint16_t model) { return model == SCS_MODEL_SCS0009; }
 
 static std::string describe_error(uint8_t flags) {
   if (flags == 0)
@@ -49,13 +70,37 @@ static std::string describe_error(uint8_t flags) {
   return out;
 }
 
-void STS3215::setup() {
+void FeetechServo::setup() {
   this->flush_input_();
   this->online_ = this->ping();
   if (!this->online_) {
     ESP_LOGW(TAG, "No response from servo id %u - check wiring, power and baud rate", this->servo_id_);
   } else {
     ESP_LOGI(TAG, "Servo id %u is responding", this->servo_id_);
+    // Read the model number before anything else. Every SMS/STS servo shares
+    // one control table, so this does not change how the servo is driven, but
+    // an SCS-series part would need protocol 1 and a 1024-step encoder -- it
+    // would answer a ping and then report positions that are quietly wrong.
+    auto model = this->read_register_u16(STS_REG_MODEL_NUMBER);
+    if (model.has_value()) {
+      this->model_number_ = *model;
+      if (model_is_scs_series(this->model_number_)) {
+        ESP_LOGE(TAG,
+                 "Servo reports model %u (%s), which is an SCS-series part. This component speaks the "
+                 "SMS/STS protocol; positions and limits will be wrong. Refusing to configure it.",
+                 this->model_number_, model_number_to_string(this->model_number_));
+        this->online_ = false;
+        this->mark_failed();
+      } else {
+        ESP_LOGI(TAG, "Servo model number %u (%s)", this->model_number_,
+                 model_number_to_string(this->model_number_));
+      }
+    } else {
+      ESP_LOGW(TAG, "Could not read the servo's model number");
+    }
+  }
+
+  if (this->online_) {
     // Bring the servo's own travel limits in line with the configuration. Both
     // helpers read before writing, so a servo that is already set up costs
     // nothing and takes no EEPROM wear.
@@ -69,12 +114,24 @@ void STS3215::setup() {
   if (this->online_sensor_ != nullptr)
     this->online_sensor_->publish_state(this->online_);
 #endif
+#ifdef USE_TEXT_SENSOR
+  if (this->model_text_sensor_ != nullptr) {
+    if (this->model_number_ == 0) {
+      this->model_text_sensor_->publish_state("offline");
+    } else {
+      char buf[40];
+      snprintf(buf, sizeof(buf), "%s (%u)", model_number_to_string(this->model_number_), this->model_number_);
+      this->model_text_sensor_->publish_state(buf);
+    }
+  }
+#endif
   this->publish_result_();
 }
 
-void STS3215::dump_config() {
-  ESP_LOGCONFIG(TAG, "Feetech STS3215 bus servo:");
+void FeetechServo::dump_config() {
+  ESP_LOGCONFIG(TAG, "Feetech SMS/STS bus servo:");
   ESP_LOGCONFIG(TAG, "  Servo ID: %u", this->servo_id_);
+  ESP_LOGCONFIG(TAG, "  Model number: %u (%s)", this->model_number_, model_number_to_string(this->model_number_));
   ESP_LOGCONFIG(TAG, "  Default speed: %u steps/s", this->default_speed_);
   ESP_LOGCONFIG(TAG, "  Default acceleration: %u", this->default_acceleration_);
   ESP_LOGCONFIG(TAG, "  Travel: %s", this->multi_turn_ ? "multi-turn (+/- 7 turns)" : "single turn");
@@ -86,14 +143,14 @@ void STS3215::dump_config() {
 }
 
 // -------------------------------------------------------------------- frames
-void STS3215::flush_input_() {
+void FeetechServo::flush_input_() {
   uint8_t dummy;
   while (this->available() > 0) {
     this->read_byte(&dummy);
   }
 }
 
-bool STS3215::read_byte_with_timeout_(uint8_t *out) {
+bool FeetechServo::read_byte_with_timeout_(uint8_t *out) {
   const uint32_t start = millis();
   while (millis() - start < this->timeout_ms_) {
     if (this->available() > 0)
@@ -103,7 +160,7 @@ bool STS3215::read_byte_with_timeout_(uint8_t *out) {
   return false;
 }
 
-bool STS3215::send_and_receive_(uint8_t instruction, const uint8_t *params, uint8_t param_count,
+bool FeetechServo::send_and_receive_(uint8_t instruction, const uint8_t *params, uint8_t param_count,
                                 uint8_t *response, uint8_t response_len) {
   this->flush_input_();
 
@@ -198,39 +255,39 @@ bool STS3215::send_and_receive_(uint8_t instruction, const uint8_t *params, uint
 }
 
 // ------------------------------------------------------------------ registers
-bool STS3215::write_register_u8(uint8_t reg, uint8_t value) {
+bool FeetechServo::write_register_u8(uint8_t reg, uint8_t value) {
   const uint8_t params[2] = {reg, value};
   // The servo acknowledges writes with a status frame, so this confirms the
   // write landed rather than assuming it did.
   return this->send_and_receive_(STS_INST_WRITE, params, 2, nullptr, 0);
 }
 
-bool STS3215::write_register_u16(uint8_t reg, uint16_t value) {
+bool FeetechServo::write_register_u16(uint8_t reg, uint16_t value) {
   // Little-endian: low byte first.
   const uint8_t params[3] = {reg, static_cast<uint8_t>(value & 0xFF), static_cast<uint8_t>(value >> 8)};
   return this->send_and_receive_(STS_INST_WRITE, params, 3, nullptr, 0);
 }
 
-bool STS3215::read_block_(uint8_t reg, uint8_t length, uint8_t *out) {
+bool FeetechServo::read_block_(uint8_t reg, uint8_t length, uint8_t *out) {
   const uint8_t params[2] = {reg, length};
   return this->send_and_receive_(STS_INST_READ, params, 2, out, length);
 }
 
-optional<uint8_t> STS3215::read_register_u8(uint8_t reg) {
+optional<uint8_t> FeetechServo::read_register_u8(uint8_t reg) {
   uint8_t buffer = 0;
   if (!this->read_block_(reg, 1, &buffer))
     return {};
   return buffer;
 }
 
-optional<uint16_t> STS3215::read_register_u16(uint8_t reg) {
+optional<uint16_t> FeetechServo::read_register_u16(uint8_t reg) {
   uint8_t buffer[2] = {0, 0};
   if (!this->read_block_(reg, 2, buffer))
     return {};
   return static_cast<uint16_t>(buffer[0] | (buffer[1] << 8));
 }
 
-bool STS3215::write_eeprom_u8_(uint8_t reg, uint8_t value) {
+bool FeetechServo::write_eeprom_u8_(uint8_t reg, uint8_t value) {
   // Lock register: 0 unlocks EEPROM for writing, 1 locks it again.
   this->write_register_u8(STS_REG_LOCK, 0);
   delay(5);
@@ -240,7 +297,7 @@ bool STS3215::write_eeprom_u8_(uint8_t reg, uint8_t value) {
   return ok;
 }
 
-bool STS3215::write_eeprom_u16_(uint8_t reg, uint16_t value) {
+bool FeetechServo::write_eeprom_u16_(uint8_t reg, uint16_t value) {
   this->write_register_u8(STS_REG_LOCK, 0);
   delay(5);
   const bool ok = this->write_register_u16(reg, value);
@@ -249,7 +306,7 @@ bool STS3215::write_eeprom_u16_(uint8_t reg, uint16_t value) {
   return ok;
 }
 
-bool STS3215::ensure_eeprom_u8_(uint8_t reg, uint8_t value) {
+bool FeetechServo::ensure_eeprom_u8_(uint8_t reg, uint8_t value) {
   const auto current = this->read_register_u8(reg);
   if (current.has_value() && *current == value)
     return true;
@@ -257,7 +314,7 @@ bool STS3215::ensure_eeprom_u8_(uint8_t reg, uint8_t value) {
   return this->write_eeprom_u8_(reg, value);
 }
 
-bool STS3215::ensure_eeprom_u16_(uint8_t reg, uint16_t value) {
+bool FeetechServo::ensure_eeprom_u16_(uint8_t reg, uint16_t value) {
   const auto current = this->read_register_u16(reg);
   if (current.has_value() && *current == value)
     return true;
@@ -266,23 +323,23 @@ bool STS3215::ensure_eeprom_u16_(uint8_t reg, uint16_t value) {
 }
 
 // ----------------------------------------------------------------- encoding
-int STS3215::decode_sign_magnitude(uint16_t raw, uint8_t sign_bit) {
+int FeetechServo::decode_sign_magnitude(uint16_t raw, uint8_t sign_bit) {
   const uint16_t magnitude = raw & ((1u << sign_bit) - 1u);
   const bool negative = (raw >> sign_bit) & 1u;
   return negative ? -static_cast<int>(magnitude) : static_cast<int>(magnitude);
 }
 
-uint16_t STS3215::encode_sign_magnitude(int value, uint8_t sign_bit) {
+uint16_t FeetechServo::encode_sign_magnitude(int value, uint8_t sign_bit) {
   const uint16_t magnitude = static_cast<uint16_t>(value < 0 ? -value : value) & ((1u << sign_bit) - 1u);
   return value < 0 ? (magnitude | (1u << sign_bit)) : magnitude;
 }
 
 // ------------------------------------------------------------------ control
-bool STS3215::ping() { return this->send_and_receive_(STS_INST_PING, nullptr, 0, nullptr, 1); }
+bool FeetechServo::ping() { return this->send_and_receive_(STS_INST_PING, nullptr, 0, nullptr, 1); }
 
-optional<uint8_t> STS3215::read_status() { return this->read_register_u8(STS_REG_STATUS); }
+optional<uint8_t> FeetechServo::read_status() { return this->read_register_u8(STS_REG_STATUS); }
 
-void STS3215::set_torque(bool enabled) {
+void FeetechServo::set_torque(bool enabled) {
   if (this->write_register_u8(STS_REG_TORQUE_ENABLE, enabled ? STS_TORQUE_ON : STS_TORQUE_OFF)) {
     ESP_LOGD(TAG, "Torque %s", enabled ? "enabled" : "released");
   } else {
@@ -293,14 +350,14 @@ void STS3215::set_torque(bool enabled) {
     this->publish_holding_(false);
 }
 
-optional<bool> STS3215::read_torque_enabled() {
+optional<bool> FeetechServo::read_torque_enabled() {
   const auto raw = this->read_register_u8(STS_REG_TORQUE_ENABLE);
   if (!raw.has_value())
     return {};
   return *raw != STS_TORQUE_OFF;
 }
 
-int32_t STS3215::clamp_target_(int32_t position) const {
+int32_t FeetechServo::clamp_target_(int32_t position) const {
   if (this->multi_turn_) {
     if (position < STS_MULTITURN_MIN)
       return STS_MULTITURN_MIN;
@@ -315,7 +372,7 @@ int32_t STS3215::clamp_target_(int32_t position) const {
   return position;
 }
 
-void STS3215::move_to(int32_t position, int speed, int acceleration) {
+void FeetechServo::move_to(int32_t position, int speed, int acceleration) {
   position = this->clamp_target_(position);
 
   const uint8_t accel = acceleration < 0 ? this->default_acceleration_ : static_cast<uint8_t>(acceleration);
@@ -333,7 +390,7 @@ void STS3215::move_to(int32_t position, int speed, int acceleration) {
   ESP_LOGD(TAG, "Goal %d (speed %u, accel %u)", (int) position, velocity, accel);
 }
 
-void STS3215::start_move(int32_t position, int speed, int acceleration) {
+void FeetechServo::start_move(int32_t position, int speed, int acceleration) {
   const int32_t clamped = this->clamp_target_(position);
   if (clamped != position) {
     // Silently truncating a goal is how a lock ends up reporting a successful
@@ -355,7 +412,7 @@ void STS3215::start_move(int32_t position, int speed, int acceleration) {
   ESP_LOGD(TAG, "Move to %d started", (int) position);
 }
 
-void STS3215::start_seek_stall(int direction, int load_threshold, int32_t max_steps, int speed) {
+void FeetechServo::start_seek_stall(int direction, int load_threshold, int32_t max_steps, int speed) {
   if (this->position_ < 0 && !this->refresh_motion_()) {
     this->finish_move_(MoveResult::OFFLINE);
     return;
@@ -389,7 +446,7 @@ void STS3215::start_seek_stall(int direction, int load_threshold, int32_t max_st
            (int) this->position_);
 }
 
-void STS3215::abort_move() {
+void FeetechServo::abort_move() {
   if (this->move_result_ != MoveResult::MOVING)
     return;
   if (this->position_ >= 0)
@@ -397,7 +454,7 @@ void STS3215::abort_move() {
   this->finish_move_(MoveResult::ABORTED);
 }
 
-void STS3215::finish_move_(MoveResult result) {
+void FeetechServo::finish_move_(MoveResult result) {
   this->move_result_ = result;
   this->publish_result_();
   if (result == MoveResult::ARRIVED) {
@@ -410,14 +467,14 @@ void STS3215::finish_move_(MoveResult result) {
   this->verify_holding();
 }
 
-void STS3215::publish_result_() {
+void FeetechServo::publish_result_() {
 #ifdef USE_TEXT_SENSOR
   if (this->result_text_sensor_ != nullptr)
     this->result_text_sensor_->publish_state(move_result_to_string(this->move_result_));
 #endif
 }
 
-void STS3215::publish_holding_(bool holding) {
+void FeetechServo::publish_holding_(bool holding) {
   if (holding == this->holding_)
     return;
   this->holding_ = holding;
@@ -427,7 +484,7 @@ void STS3215::publish_holding_(bool holding) {
 #endif
 }
 
-bool STS3215::verify_holding() {
+bool FeetechServo::verify_holding() {
   const auto torque = this->read_torque_enabled();
   if (!torque.has_value()) {
     this->publish_holding_(false);
@@ -442,14 +499,14 @@ bool STS3215::verify_holding() {
   return holding;
 }
 
-float STS3215::turns() const {
+float FeetechServo::turns() const {
   if (this->position_ < 0)
     return 0.0f;
   return this->position_ / static_cast<float>(STS_RESOLUTION);
 }
 
 // ------------------------------------------------------------ configuration
-bool STS3215::apply_multi_turn(bool enabled) {
+bool FeetechServo::apply_multi_turn(bool enabled) {
   // Official ST3215 memory table, register 0x21: "When performing multi-turn
   // absolute position control, [min and max angle] are set to 0." With both
   // limits at zero the goal register accepts -30719..30719 instead of 0..4095.
@@ -475,32 +532,32 @@ bool STS3215::apply_multi_turn(bool enabled) {
   return true;
 }
 
-bool STS3215::set_operating_mode(uint8_t mode) {
+bool FeetechServo::set_operating_mode(uint8_t mode) {
   if (mode > STS_MODE_STEP)
     return false;
   return this->ensure_eeprom_u8_(STS_REG_OPERATING_MODE, mode);
 }
 
-bool STS3215::set_torque_limit(uint16_t limit) {
+bool FeetechServo::set_torque_limit(uint16_t limit) {
   if (limit > STS_MAX_TORQUE)
     limit = STS_MAX_TORQUE;
   return this->write_register_u16(STS_REG_TORQUE_LIMIT, limit);
 }
 
-bool STS3215::set_max_torque(uint16_t limit) {
+bool FeetechServo::set_max_torque(uint16_t limit) {
   if (limit > STS_MAX_TORQUE)
     limit = STS_MAX_TORQUE;
   return this->ensure_eeprom_u16_(STS_REG_MAX_TORQUE_LIMIT, limit);
 }
 
-bool STS3215::write_position_limits(int32_t min_pos, int32_t max_pos) {
+bool FeetechServo::write_position_limits(int32_t min_pos, int32_t max_pos) {
   const bool ok_min = this->ensure_eeprom_u16_(STS_REG_MIN_POSITION_LIMIT, encode_sign_magnitude(min_pos, 15));
   const bool ok_max = this->ensure_eeprom_u16_(STS_REG_MAX_POSITION_LIMIT, encode_sign_magnitude(max_pos, 15));
   this->multi_turn_ = (min_pos == 0 && max_pos == 0);
   return ok_min && ok_max;
 }
 
-bool STS3215::set_protection(uint8_t overload_torque_pct, uint16_t protection_time_ms,
+bool FeetechServo::set_protection(uint8_t overload_torque_pct, uint16_t protection_time_ms,
                              uint8_t protective_torque_pct) {
   if (overload_torque_pct > 100)
     overload_torque_pct = 100;
@@ -516,7 +573,7 @@ bool STS3215::set_protection(uint8_t overload_torque_pct, uint16_t protection_ti
   return a && b && c;
 }
 
-bool STS3215::set_overload_protection_enabled(bool enabled) {
+bool FeetechServo::set_overload_protection_enabled(bool enabled) {
   const auto current = this->read_register_u8(STS_REG_UNLOADING_CONDITION);
   if (!current.has_value())
     return false;
@@ -529,7 +586,7 @@ bool STS3215::set_overload_protection_enabled(bool enabled) {
   return this->write_eeprom_u8_(STS_REG_UNLOADING_CONDITION, updated);
 }
 
-bool STS3215::set_homing_offset(int offset) {
+bool FeetechServo::set_homing_offset(int offset) {
   if (offset > 2047)
     offset = 2047;
   if (offset < -2047)
@@ -538,14 +595,14 @@ bool STS3215::set_homing_offset(int offset) {
   return this->ensure_eeprom_u16_(STS_REG_HOMING_OFFSET, encode_sign_magnitude(offset, 11));
 }
 
-optional<int> STS3215::read_homing_offset() {
+optional<int> FeetechServo::read_homing_offset() {
   const auto raw = this->read_register_u16(STS_REG_HOMING_OFFSET);
   if (!raw.has_value())
     return {};
   return decode_sign_magnitude(*raw, 11);
 }
 
-bool STS3215::recenter_here() {
+bool FeetechServo::recenter_here() {
   // Register 40 accepts 128 as "correct the current position to 2048".
   if (!this->write_register_u8(STS_REG_TORQUE_ENABLE, STS_TORQUE_RECENTER))
     return false;
@@ -556,7 +613,7 @@ bool STS3215::recenter_here() {
   return true;
 }
 
-bool STS3215::change_servo_id(uint8_t new_id) {
+bool FeetechServo::change_servo_id(uint8_t new_id) {
   if (new_id > 253)
     return false;
   this->write_register_u8(STS_REG_LOCK, 0);
@@ -573,7 +630,7 @@ bool STS3215::change_servo_id(uint8_t new_id) {
 }
 
 // ------------------------------------------------------------- move engine
-bool STS3215::refresh_motion_() {
+bool FeetechServo::refresh_motion_() {
   // Present_Position(56,2) Present_Velocity(58,2) Present_Load(60,2)
   // Present_Voltage(62,1) Present_Temperature(63,1) -> one 8 byte read.
   uint8_t buffer[8] = {0};
@@ -621,7 +678,7 @@ bool STS3215::refresh_motion_() {
   return true;
 }
 
-void STS3215::loop() {
+void FeetechServo::loop() {
   if (this->move_result_ != MoveResult::MOVING)
     return;
 
@@ -722,7 +779,7 @@ void STS3215::loop() {
 }
 
 // ------------------------------------------------------------------- polling
-void STS3215::update() {
+void FeetechServo::update() {
   // The move engine is already sampling at 25 ms; do not compete with it for
   // the bus, just republish what it has gathered.
   if (this->move_result_ != MoveResult::MOVING) {
@@ -759,5 +816,5 @@ void STS3215::update() {
 #endif
 }
 
-}  // namespace sts3215
+}  // namespace feetech_servo
 }  // namespace esphome

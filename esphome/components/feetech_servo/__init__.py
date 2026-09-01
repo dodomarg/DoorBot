@@ -1,4 +1,9 @@
-"""ESPHome component for Feetech STS3215 / SMS-STS serial bus servos.
+"""ESPHome component for Feetech SMS/STS serial bus servos.
+
+Covers the ST3215 and ST3235, which share one control table, a 4096-step
+encoder, protocol 0 and a 1,000,000 baud default. The model number in register
+3 is read and reported at startup, and an SCS-series servo -- protocol 1, 1024
+steps, big-endian -- is rejected rather than driven with the wrong encoding.
 
 Designed for a Seeed XIAO ESP32S3 plugged into a Seeed "Bus Servo Driver Board
 for XIAO" (a.k.a. XIAO Bus Servo Adapter), which handles the half-duplex bus
@@ -41,6 +46,7 @@ CONF_OVERLOAD = "overload"
 CONF_TURNS = "turns"
 CONF_MOVE_RESULT = "move_result"
 CONF_ERROR = "error"
+CONF_MODEL = "model"
 CONF_MULTI_TURN = "multi_turn"
 CONF_TOLERANCE = "tolerance"
 CONF_JAM_LOAD = "jam_load"
@@ -50,13 +56,13 @@ UNIT_MILLIAMP = "mA"
 UNIT_STEPS = "steps"
 UNIT_TURNS = "turns"
 
-sts3215_ns = cg.esphome_ns.namespace("sts3215")
-STS3215 = sts3215_ns.class_("STS3215", cg.PollingComponent, uart.UARTDevice)
+feetech_ns = cg.esphome_ns.namespace("feetech_servo")
+FeetechServo = feetech_ns.class_("FeetechServo", cg.PollingComponent, uart.UARTDevice)
 
 CONFIG_SCHEMA = (
     cv.Schema(
         {
-            cv.GenerateID(): cv.declare_id(STS3215),
+            cv.GenerateID(): cv.declare_id(FeetechServo),
             cv.Optional(CONF_SERVO_ID, default=1): cv.int_range(min=0, max=253),
             cv.Optional(CONF_DEFAULT_SPEED, default=800): cv.int_range(min=0, max=4000),
             cv.Optional(CONF_DEFAULT_ACCELERATION, default=30): cv.int_range(min=0, max=255),
@@ -119,6 +125,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_ERROR): text_sensor.text_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            cv.Optional(CONF_MODEL): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
             cv.Optional(CONF_MOVING): binary_sensor.binary_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
@@ -133,7 +142,7 @@ CONFIG_SCHEMA = (
 )
 
 FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
-    "sts3215", baud_rate=1000000, require_tx=True, require_rx=True
+    "feetech_servo", baud_rate=1000000, require_tx=True, require_rx=True
 )
 
 SENSOR_SETTERS = {
@@ -155,6 +164,7 @@ BINARY_SENSOR_SETTERS = {
 TEXT_SENSOR_SETTERS = {
     CONF_MOVE_RESULT: "set_result_text_sensor",
     CONF_ERROR: "set_error_text_sensor",
+    CONF_MODEL: "set_model_text_sensor",
 }
 
 

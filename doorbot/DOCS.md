@@ -3,14 +3,14 @@
 Calibrate a DIY servo deadbolt and manage its PIN codes, from inside Home
 Assistant.
 
-DoorBot drives a **Feetech STS3215** serial bus servo through a **Seeed XIAO
+DoorBot drives a **Feetech ST3215 or ST3235** serial bus servo through a **Seeed XIAO
 ESP32S3** running ESPHome. This add-on gives you the bit that ESPHome doesn't:
 a guided calibration wizard (much like a SwitchBot Lock's) and proper PIN code
 management with schedules, one-time codes and an audit trail.
 
 ## Try it before you build anything
 
-Leave `backend` on **`mock`**. The add-on then runs against a simulated STS3215
+Leave `backend` on **`mock`**. The add-on then runs against a simulated servo
 with realistic travel time, load feedback and end stops. You can walk the whole
 calibration wizard, add PIN codes, use the virtual keypad and even trigger a
 simulated jam — all without hardware. Switch to `esphome` once your ESP32 is

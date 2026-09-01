@@ -1,14 +1,14 @@
 # DoorBot
 
-A DIY retrofit smart lock: a **Seeed XIAO ESP32S3** driving a **Feetech STS3215**
-serial bus servo through a **Seeed Bus Servo Driver Board (XIAO Bus Servo
+A DIY retrofit smart lock: a **Seeed XIAO ESP32S3** driving a **Feetech ST3215 or
+ST3235** serial bus servo through a **Seeed Bus Servo Driver Board (XIAO Bus Servo
 Adapter)**, controlled from **Home Assistant**, with an add-on for calibration
 and PIN management — and optional PIN entry from a **SwitchBot Keypad**.
 
 ```
               encrypted BLE                Wi-Fi / ESPHome API
 SwitchBot Keypad ───────────► XIAO ESP32S3 ────────────────────► Home Assistant
-  (PIN / NFC /                + STS3215                              │
+  (PIN / NFC /                + Feetech servo                        │
    fingerprint / face)           │                                   │
                             deadbolt turn                     DoorBot add-on
                                                         (calibration + PIN codes)
@@ -23,7 +23,7 @@ every unlock **encrypted** — including *which* credential was used.
 |---|---|
 | `doorbot/` | The Home Assistant add-on (web UI: calibration wizard, PIN codes, event log) |
 | `esphome/doorbot.yaml` | Firmware for the XIAO ESP32S3 |
-| `esphome/components/sts3215/` | ESPHome external component implementing the Feetech STS/SMS bus protocol |
+| `esphome/components/feetech_servo/` | ESPHome external component implementing the Feetech SMS/STS bus protocol |
 | `hardware/` | FreeCAD model of the enclosure / bracket |
 | `docs/` | Protocol notes, wiring, and setup guides |
 | `repository.yaml` | Makes this repo installable as a Home Assistant add-on repository |
@@ -38,7 +38,7 @@ DOORBOT_DATA=/tmp/doorbot-data DOORBOT_PORT=8099 python3 -m app
 # then open http://localhost:8099
 ```
 
-It starts in **mock** mode with a simulated STS3215, so you can run the whole
+It starts in **mock** mode with a simulated servo, so you can run the whole
 calibration wizard, add PIN codes, test the virtual keypad and even simulate a
 jam before any hardware exists. No third-party Python packages required.
 
@@ -64,12 +64,12 @@ Wiring (the XIAO plugs straight into the driver board headers):
 | D7 / GPIO44 | servo bus **RX** |
 | — | DC IN 5–12 V matching the servo |
 
-The servo bus runs at **1,000,000 baud** (STS3215 factory default) and the
+The servo bus runs at **1,000,000 baud** (the factory default for both models) and the
 driver board handles the half-duplex conversion, so a plain UART is all that is
 needed.
 
-Power the servo from the driver board's DC jack, never from USB — the STS3215
-stalls at well over an amp and will brown out the XIAO.
+Power the servo from the driver board's DC jack, never from USB — both models
+draw 2.7 A locked-rotor and will brown out the XIAO.
 
 #### Changing Wi-Fi later
 
@@ -116,7 +116,7 @@ Set **Hold for** to 0 if your handle retracts the latch itself.
 
 If the latch slips while being held, it is almost always the servo's own
 overload protection cutting output. Raise **Protective torque** on the ESP32
-device page; `docs/sts3215.md` explains the mechanism.
+device page; `docs/feetech-servo.md` explains the mechanism.
 
 The calibration is also stored on the ESP32 itself in `restore_value` number
 entities, so the lock keeps working if the add-on or Home Assistant is down.

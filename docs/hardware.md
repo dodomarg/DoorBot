@@ -6,7 +6,7 @@
 |---|---|
 | Seeed **XIAO ESP32S3** | The plain model is fine; Sense also works. Needs BLE for the keypad. |
 | Seeed **Bus Servo Driver Board for XIAO** | a.k.a. *XIAO Bus Servo Adapter*. Does the half-duplex bus conversion. |
-| **Feetech STS3215** serial bus servo | 12 V or 7.4 V variant — match the PSU to it |
+| **Feetech ST3215 or ST3235** serial bus servo | Both take 6–12.6 V; 12 V gives full torque. The ST3235 has steel gears and is the better choice for a lock |
 | DC PSU, **5.5 × 2.1 mm barrel** | 5–12 V, matching the servo. ~2 A headroom for stall current. |
 | USB-C supply for the XIAO | The XIAO is powered **separately** from the servo |
 | Thumbturn adapter / bracket | See `hardware/freecad/DoorBot.FCStd` |
@@ -46,10 +46,10 @@ selects UART mode. It is **shorted by default** — leave it on.
 ### Power
 
 - **Servo power** goes into the barrel jack: 5–12 V, matched to the servo.
-  ST-series ≈ 9 V, SC-series ≈ 12 V. Check your specific STS3215 variant.
+  ST-series ≈ 9 V, SC-series ≈ 12 V. Check your specific servo variant.
 - **The XIAO needs its own supply** over USB-C. Don't try to run it from the
   servo rail.
-- Give the supply real current headroom. A stalled STS3215 pulls far more than
+- Give the supply real current headroom. A stalled ST3215/ST3235 pulls far more than
   its idle draw, and a browning-out ESP32 mid-turn is exactly what you don't
   want in a lock.
 

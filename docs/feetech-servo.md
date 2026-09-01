@@ -1,4 +1,6 @@
-# Feetech STS3215 — protocol notes
+# Feetech SMS/STS bus servos — protocol notes
+
+Applies to the **ST3215** and **ST3235**, the two servos DoorBot targets.
 
 Verified against two independent sources:
 
@@ -10,12 +12,44 @@ Verified against two independent sources:
   a well-tested in-production implementation, used to cross-check the value
   encodings.
 
+## Supported models
+
+LeRobot maps every SMS/STS part — `sts_series`, `sms_series`, `sts3215`,
+`sts3250`, `sm8512bl` — onto the **same** `STS_SMS_SERIES_CONTROL_TABLE`, the
+same 4096-step resolution and the same protocol 0. So the driver is not
+model-specific, and the ST3235 needs no code changes.
+
+Waveshare's own specifications, compared:
+
+| | ST3215 | ST3235 |
+|---|---|---|
+| Input voltage | 6–12.6 V | 6–12.6 V |
+| Encoder | 360°/4096 | 360°/4096 |
+| Baud | 1 Mbps | 1 Mbps |
+| Torque @12 V | 30 kg·cm | 30 kg·cm |
+| No-load speed | 0.222 s/60° (45 RPM) | 0.222 s/60° (45 RPM) |
+| Locked-rotor current | 2.7 A | 2.7 A |
+| Idle current | 200 mA | 190 mA |
+| Dimensions | 45.22 × 35 × 24.72 mm | 45.22 × 35 × 24.72 mm |
+| Gears | high-precision metal | **high-precision steel, 1:345** |
+| Reported feedback | position, load, speed, voltage | position, load, speed, voltage, **current, temperature** |
+
+The two are interchangeable for DoorBot's purposes. The ST3235's steel gearing
+is the reason to prefer it on a lock: a euro cylinder that binds puts the whole
+load through the gear train, and that is where a servo fails first.
+
+⚠️ The **SCS** series is a genuinely different animal — protocol 1, big-endian,
+and **1024** steps per revolution. It answers a ping and then reports positions
+that are quietly wrong. The component reads the model number at startup and
+refuses to configure a known SCS part rather than driving it with the wrong
+encoding.
+
 ## Basics
 
 | Property | Value |
 |---|---|
 | Protocol | Feetech **SMS/STS**, protocol version **0** |
-| Model number | 777 |
+| Model number | register 3, read-only, 2 bytes (ST3215 reports **777**) |
 | Resolution | **4096** steps per revolution |
 | Default baud | **1,000,000** (baud table index 0) |
 | Default ID | 1 |
@@ -131,10 +165,10 @@ DoorBot's jam detection compares `abs(load)` against a threshold.
 
 ## Practical notes for a door lock
 
-- **Torque limit (48)** — cap this. A STS3215 makes ~19–30 kg·cm and will
+- **Torque limit (48)** — cap this. An ST3215 or ST3235 makes up to 30 kg·cm and will
   happily destroy a thumbturn or strip the mechanism. Start around 700/1000.
 - **Acceleration (41)** — a low value makes the turn smooth and quiet.
-- **Goal_Velocity (46)** — the STS3215 uses this as a speed cap in position
+- **Goal_Velocity (46)** — these servos use this as a speed cap in position
   mode; ~800 is a sensible starting point.
 - **Position limits (9/11)** — set these once calibrated so a bad command can't
   drive the bolt into a hard stop.

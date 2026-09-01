@@ -2,7 +2,7 @@
 
 Two interchangeable backends:
 
-* ``MockBackend``    - a physics-lite simulation of a Feetech STS3215 on a
+* ``MockBackend``    - a physics-lite simulation of a Feetech SMS/STS bus servo on a
   deadbolt. It models travel time, load rising near the end stops and jamming,
   so the whole add-on (calibration wizard included) can be exercised with no
   hardware attached.
@@ -21,7 +21,7 @@ from typing import Any, Callable
 from .db import Database
 from .hass import HassClient, HassError
 
-# Servo raw units. The STS3215 is a 12-bit encoder: 0..4095 over 360 degrees.
+# Servo raw units. SMS/STS servos use a 12-bit encoder: 0..4095 over 360 degrees.
 RESOLUTION = 4096
 # With both angle limits set to 0 the servo accepts multi-turn goals over this
 # range instead of a single revolution (official ST3215 register map, reg 0x2A).
@@ -78,7 +78,7 @@ class BaseBackend:
 
 
 class MockBackend(BaseBackend):
-    """Simulated STS3215 so the add-on is fully testable without hardware."""
+    """Simulated Feetech bus servo so the add-on is fully testable without hardware."""
 
     name = "mock"
 
@@ -139,7 +139,7 @@ class MockBackend(BaseBackend):
             self._load *= 0.5
             return
 
-        # STS3215 goal velocity is in steps/second-ish; scale for realism.
+        # Goal velocity is in steps/second-ish; scale for realism.
         step = self._speed * dt
         delta = self._goal - self._position
         moving = abs(delta) > 1.0

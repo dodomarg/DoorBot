@@ -1,13 +1,20 @@
 # ---------------------------------------------------------------------------
-# DoorBot - Seeed XIAO ESP32S3 + Seeed Bus Servo Driver Board + Feetech STS3215
+# DoorBot - Seeed XIAO ESP32S3 + Seeed Bus Servo Driver Board + Feetech servo
+#
+# Tested servo models: ST3215 and ST3235. They share the Feetech SMS/STS
+# control table, a 4096-step encoder and a 1,000,000 baud default, so the same
+# driver handles both. The ST3235 differs mechanically -- steel gears with a
+# 1:345 reduction, and it reports current and temperature as well as position,
+# load, speed and voltage.
 #
 # Wiring (the XIAO plugs straight into the driver board's headers):
 #   XIAO D6 / GPIO43 -> servo bus TX
 #   XIAO D7 / GPIO44 -> servo bus RX
-#   Driver board DC IN: 5-12 V matching your servo (STS3215 12 V variant -> 12 V)
+#   Driver board DC IN: 5-12 V matching your servo (both models take 6-12.6 V,
+#     so 12 V is the sensible choice for full torque)
 #   The XIAO is powered separately over USB-C.
 #
-# The servo bus runs at 1,000,000 baud, which is the STS3215 factory default.
+# The servo bus runs at 1,000,000 baud, which is the factory default for both.
 # ---------------------------------------------------------------------------
 
 substitutions:
@@ -39,10 +46,10 @@ external_components:
   - source:
       type: local
       path: components
-    components: [sts3215]
+    components: [feetech_servo]
   # When running from GitHub instead, swap the block above for:
   # - source: github://dodomarg/DoorBot@main
-  #   components: [sts3215]
+  #   components: [feetech_servo]
   - source: github://pierluigizagaria/switchbot-keypad-bridge
     components: [switchbot_keypad_bridge]
 
@@ -167,7 +174,7 @@ uart:
   parity: NONE
   stop_bits: 1
 
-sts3215:
+feetech_servo:
   id: bolt
   uart_id: servo_bus
   servo_id: 1
@@ -204,6 +211,8 @@ sts3215:
   online:
     name: "Servo online"
     id: servo_online
+  model:
+    name: "Servo model"
   holding:
     name: "Holding position"
     id: servo_holding
@@ -336,7 +345,7 @@ number:
     entity_category: config
 
   # --- servo programming, all of it reachable from Home Assistant ---------
-  # Every one of these writes the servo's own registers, so the STS3215 never
+  # Every one of these writes the servo's own registers, so the servo never
   # has to be plugged into Feetech's Windows tool.
   - platform: template
     name: "Max torque"
@@ -685,7 +694,7 @@ script:
           format: "DoorBot %s failed: %s at %d (goal %d, load %d)"
           args:
             - 'stage.c_str()'
-            - 'esphome::sts3215::move_result_to_string(id(bolt)->move_result())'
+            - 'esphome::feetech_servo::move_result_to_string(id(bolt)->move_result())'
             - '(int) id(bolt)->position()'
             - '(int) id(bolt)->goal()'
             - 'id(bolt)->load()'
@@ -693,7 +702,7 @@ script:
           event: esphome.doorbot_jammed
           data_template:
             stage: !lambda 'return stage;'
-            result: !lambda 'return esphome::sts3215::move_result_to_string(id(bolt)->move_result());'
+            result: !lambda 'return esphome::feetech_servo::move_result_to_string(id(bolt)->move_result());'
             position: !lambda 'return to_string(id(bolt)->position());'
             load: !lambda 'return to_string(id(bolt)->load());'
 

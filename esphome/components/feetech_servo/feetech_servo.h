@@ -14,7 +14,7 @@
 #endif
 
 namespace esphome {
-namespace sts3215 {
+namespace feetech_servo {
 
 // Feetech SMS/STS serial bus protocol ("protocol 0").
 // Frame: 0xFF 0xFF | ID | LEN | INSTRUCTION | PARAMS... | CHECKSUM
@@ -29,6 +29,7 @@ static const uint8_t STS_INST_WRITE = 0x03;
 // Control table addresses. Verified against the official Feetech/Waveshare
 // "ST3215 memory register map" V3.7 spreadsheet and cross-checked with
 // huggingface/lerobot's STS_SMS_SERIES_CONTROL_TABLE.
+static const uint8_t STS_REG_MODEL_NUMBER = 3;  // read-only, 2 bytes
 static const uint8_t STS_REG_ID = 5;
 static const uint8_t STS_REG_BAUD_RATE = 6;
 static const uint8_t STS_REG_MIN_POSITION_LIMIT = 9;   // "Minimum angle"
@@ -104,7 +105,25 @@ enum class MoveResult : uint8_t {
 
 const char *move_result_to_string(MoveResult result);
 
-class STS3215 : public PollingComponent, public uart::UARTDevice {
+// Model numbers reported by register 3. Every SMS/STS servo shares one control
+// table, a 4096-step encoder and protocol 0, so an unrecognised STS model is
+// still driven correctly -- the number is reported for diagnostics rather than
+// used to gate behaviour. The SCS series is the genuine incompatibility: it is
+// protocol 1, big-endian, and 1024 steps per revolution, so its positions would
+// be silently wrong here. Numbers cross-checked against
+// huggingface/lerobot's MODEL_NUMBER_TABLE.
+static const uint16_t STS_MODEL_STS3215 = 777;
+static const uint16_t STS_MODEL_STS3250 = 2825;
+static const uint16_t STS_MODEL_SM8512BL = 11272;
+static const uint16_t SCS_MODEL_SCS0009 = 1284;
+
+/// Human-readable name for a model number, or "unknown" if not recognised.
+const char *model_number_to_string(uint16_t model);
+
+/// True for model numbers known to use the incompatible SCSCL protocol.
+bool model_is_scs_series(uint16_t model);
+
+class FeetechServo : public PollingComponent, public uart::UARTDevice {
  public:
   void setup() override;
   void loop() override;
@@ -137,6 +156,7 @@ class STS3215 : public PollingComponent, public uart::UARTDevice {
 #ifdef USE_TEXT_SENSOR
   void set_result_text_sensor(text_sensor::TextSensor *s) { this->result_text_sensor_ = s; }
   void set_error_text_sensor(text_sensor::TextSensor *s) { this->error_text_sensor_ = s; }
+  void set_model_text_sensor(text_sensor::TextSensor *s) { this->model_text_sensor_ = s; }
 #endif
 
   // --- movement ------------------------------------------------------------
@@ -179,6 +199,7 @@ class STS3215 : public PollingComponent, public uart::UARTDevice {
   int velocity() const { return this->velocity_; }
   bool moving() const { return this->moving_; }
   bool online() const { return this->online_; }
+  uint16_t model_number() const { return this->model_number_; }
   bool multi_turn() const { return this->multi_turn_; }
   /// Full turns away from the 2048 centre, for display.
   float turns() const;
@@ -256,6 +277,7 @@ class STS3215 : public PollingComponent, public uart::UARTDevice {
   float temperature_{0.0f};
   bool moving_{false};
   bool online_{false};
+  uint16_t model_number_{0};
   bool holding_{false};
   bool torque_on_{false};
   uint8_t last_error_{0};
@@ -298,8 +320,9 @@ class STS3215 : public PollingComponent, public uart::UARTDevice {
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *result_text_sensor_{nullptr};
   text_sensor::TextSensor *error_text_sensor_{nullptr};
+  text_sensor::TextSensor *model_text_sensor_{nullptr};
 #endif
 };
 
-}  // namespace sts3215
+}  // namespace feetech_servo
 }  // namespace esphome

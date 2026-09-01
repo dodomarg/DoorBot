@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    # "mock" runs a fully simulated STS3215 servo so the UI can be exercised
+    # "mock" runs a fully simulated Feetech bus servo so the UI can be exercised
     # without any hardware. "esphome" drives a real device through Home Assistant.
     "backend": "mock",
     # Entity ids on the ESPHome node (only used when backend == "esphome").

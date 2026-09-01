@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.1
+
+- **Support the Feetech ST3235 alongside the ST3215.** They share the SMS/STS
+  control table, a 4096-step encoder and protocol 0, so the driver needed no
+  behavioural change. The ESPHome component is now named `feetech_servo`
+  rather than `sts3215`, which was never accurate — it always spoke the family
+  protocol, not one model's dialect.
+- **The servo's model number is read and reported.** It appears in the ESP32
+  logs, in `dump_config`, and as a *Servo model* diagnostic entity. An
+  SCS-series servo is now rejected outright: it answers a ping, but it is
+  protocol 1, big-endian and 1024 steps per revolution, so it would otherwise
+  have reported positions that were quietly wrong.
+
 ## 0.2.0
 
 Closed-loop servo control. Previously DoorBot sent a move and assumed it worked;

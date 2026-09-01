@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts DESC);
 """
 
-# Sensible starting point for a Feetech STS3215 driving a euro-profile thumbturn.
+# Sensible starting point for a Feetech bus servo driving a euro-profile thumbturn.
 DEFAULT_CALIBRATION: dict[str, Any] = {
     "locked_position": 2048,
     "unlocked_position": 1024,
