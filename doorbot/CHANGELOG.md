@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.3
+
+- **The calibration wizard now shows the direction of rotation.** It is derived
+  from the two captured end points, stated in plain terms ("locking turns
+  clockwise"), and shown alongside the positions it came from. Previously the
+  direction was implicit in two numbers and never surfaced anywhere, so there
+  was no way to confirm it before running the lock against a real door.
+- **Added a *Swap direction* control.** Capturing the end points in the wrong
+  order gave the right travel in the wrong direction, and the only remedy was
+  to run the whole wizard again. Swapping exchanges the two points and carries
+  the hold-open point across with them.
+- **The jog arrows now say which way they turn.** They were labelled only with
+  raw step counts, so there was no way to tell which button moved toward
+  locked before pressing it.
+- **Fixed: *Invert direction* did nothing.** It was stored and validated but
+  never read by any code path. It now flips the jog arrows so they match a
+  mirrored mount, and it is in the wizard next to the direction it affects
+  rather than buried in the settings form.
+- **Fixed: the hold-open position was never checked against the direction of
+  travel.** A value on the locked side would drive the bolt back out while
+  reporting that the door was being held open. It is now rejected with an
+  explanation, and a hold point stranded by a direction change is retired
+  automatically rather than left pointing the wrong way.
+
 ## 0.2.2
 
 - **A servo that is not responding is now an error, not a silent success.**

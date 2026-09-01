@@ -126,6 +126,10 @@
             <button class="btn" data-jog="25" data-needs-servo>25 &raquo;</button>
             <button class="btn" data-jog="100" data-needs-servo>100 &raquo;</button>
           </div>
+          <p class="muted jog-legend">
+            <span id="jogLegendLeft">&laquo; decreasing steps</span> &middot;
+            <span id="jogLegendRight">increasing steps &raquo;</span>
+          </p>
           <div class="row">
             <button class="btn primary" data-capture="locked" data-needs-servo>Set as LOCKED</button>
             <span class="pill" id="pillLocked">&mdash;</span>
@@ -140,7 +144,24 @@
           </div>
         </li>
         <li>
-          <h3>4. Test it</h3>
+          <h3>4. Check the direction of rotation</h3>
+          <p>
+            Derived from the two points you captured. If it does not match the way
+            your lock really turns, you captured them the other way round &mdash;
+            swap them rather than starting over.
+          </p>
+          <div class="row direction-row">
+            <span class="dirbadge" id="dirBadge">&mdash;</span>
+            <button class="btn" id="btnSwapDir">Swap direction</button>
+          </div>
+          <p class="muted" id="dirDetail">&mdash;</p>
+          <label class="check">
+            <input type="checkbox" id="invertToggle">
+            The thumbturn turns the opposite way to the arrows above
+          </label>
+        </li>
+        <li>
+          <h3>5. Test it</h3>
           <div class="row">
             <button class="btn" id="btnTestLock" data-needs-servo>Test lock</button>
             <button class="btn" id="btnTestUnlock" data-needs-servo>Test unlock</button>
@@ -180,7 +201,6 @@
           </select></label>
         <label>Auto-lock after <small>seconds, 0 = off</small>
           <input type="number" name="auto_lock_seconds" min="0" max="3600"></label>
-        <label class="check"><input type="checkbox" name="invert"> Invert direction</label>
         <label class="check"><input type="checkbox" name="multi_turn"> Multi-turn
           <small>for locks needing more than one full revolution</small></label>
         <div class="formactions">

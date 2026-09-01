@@ -82,10 +82,32 @@ Open the add-on → **Calibration**:
 1. **Release servo** — torque off, so the thumbturn turns freely by hand.
 2. Turn the bolt fully **thrown**, press **Set as LOCKED**.
 3. Turn the bolt fully **retracted**, press **Set as UNLOCKED**.
-4. **Test lock** and **Test unlock**.
+4. **Check the direction of rotation** (see below).
+5. **Test lock** and **Test unlock**.
 
 The wizard warns you if the two points are closer than 60 steps, which almost
 always means the coupler slipped or you captured the same position twice.
+
+### Direction of rotation
+
+The two end points are the only source of truth for which way the lock turns:
+whichever way the servo has to count to get from unlocked to locked *is* the
+locking direction. The wizard states it plainly — "locking turns clockwise" —
+so you can check it against the real door before trusting it.
+
+If it reads the wrong way round, you captured the two points in the wrong
+order. Press **Swap direction** rather than starting again: it exchanges the
+end points and carries the hold-open point across with them.
+
+Clockwise here means clockwise *as the servo counts*, which is what you see at
+the output shaft. A mirrored mount or an extra gear reverses that. Tick **the
+thumbturn turns the opposite way to the arrows** and the jog arrows flip to
+match what you actually see.
+
+The hold-open position must lie past **unlocked**, turning the same way
+unlocking turns. A value on the locked side would drive the bolt back out while
+reporting the door as held open, so it is refused. If you later change the
+direction, a hold point left on the wrong side is retired automatically.
 
 There are also fine controls:
 

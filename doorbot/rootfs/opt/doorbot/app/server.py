@@ -128,6 +128,7 @@ class DoorBotApp:
         r.add("POST", "/api/calibration/goto", self.api_goto)
         r.add("POST", "/api/calibration/torque", self.api_torque)
         r.add("POST", "/api/calibration/reset", lambda rq: self.controller.reset_calibration())
+        r.add("POST", "/api/calibration/swap", lambda rq: self.controller.swap_direction())
 
         r.add("GET", "/api/codes", lambda rq: {"codes": self.codes.list_codes()})
         r.add("POST", "/api/codes", self.api_create_code)
@@ -388,7 +389,7 @@ class DoorBotApp:
             self._attempts.pop(source, None)
 
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 
 class DoorBotHandler(BaseHTTPRequestHandler):

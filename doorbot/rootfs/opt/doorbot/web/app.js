@@ -127,9 +127,43 @@ function renderStatus(status) {
 
   if (!$('#calForm').dataset.dirty) fillForm($('#calForm'), cal);
   if (!$('#holdForm').dataset.dirty) fillForm($('#holdForm'), cal);
+  renderDirection(status);
   $('#devCard').hidden = status.backend !== 'mock';
 
   if (status.keypad) renderKeypad(status.keypad);
+}
+
+function renderDirection(status) {
+  const dir = status.direction || {};
+  const cal = status.calibration || {};
+  const badge = $('#dirBadge');
+  // Arrows are described by what the turn looks like at the thumbturn, which is
+  // the only frame of reference the person calibrating actually has.
+  const cw = '\u21bb clockwise';
+  const ccw = '\u21ba counter-clockwise';
+  const sign = dir.sign ?? 1;
+  const invert = !!cal.invert;
+  // A positive jog is clockwise at the servo; a mirrored mount reverses it.
+  const positiveIsCw = !invert;
+  $('#jogLegendLeft').textContent = `\u00ab ${positiveIsCw ? ccw : cw}`;
+  $('#jogLegendRight').textContent = `${positiveIsCw ? cw : ccw} \u00bb`;
+
+  if (!status.calibrated) {
+    badge.textContent = 'Not calibrated yet';
+    badge.classList.remove('bad');
+    $('#dirDetail').textContent =
+      'Capture the locked and unlocked positions and the direction appears here.';
+  } else {
+    badge.textContent = `Locking turns ${dir.locking === 'clockwise' ? cw : ccw}`;
+    badge.classList.toggle('bad', dir.hold_valid === false);
+    $('#dirDetail').textContent =
+      `Locked ${cal.locked_position} \u2192 unlocked ${cal.unlocked_position}` +
+      ` (${sign > 0 ? 'locking increases' : 'locking decreases'} the step count).` +
+      (dir.hold_valid === false
+        ? ' The hold-open position is on the locked side and would drive the bolt out.'
+        : '');
+  }
+  $('#invertToggle').checked = invert;
 }
 
 function renderKeypad(kp) {
@@ -416,6 +450,17 @@ function bindEvents() {
   $('#btnTryHold').onclick = () =>
     run(async () => renderStatus(await api('open', { method: 'POST' })),
       'Unlocked and held the latch');
+
+  $('#btnSwapDir').onclick = () =>
+    run(async () => renderStatus(await api('calibration/swap', { method: 'POST' })),
+      'Swapped the direction of rotation');
+
+  $('#invertToggle').onchange = (ev) =>
+    run(async () => {
+      renderStatus(await api('calibration', {
+        method: 'POST', body: { invert: ev.target.checked },
+      }));
+    }, 'Saved');
 
   $('#jamToggle').onchange = (ev) =>
     run(() => api('dev/jam', { method: 'POST', body: { enabled: ev.target.checked } }));

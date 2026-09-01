@@ -7,7 +7,7 @@ POSTS = ("lock","unlock","stop","verify","dev/jam","keypad/event","keypad/settin
          "keypad/credentials",
          "open","dev/slip","dev/offline",
          "calibration","calibration/torque","calibration/goto","calibration/jog",
-         "calibration/capture","calibration/reset","codes")
+         "calibration/capture","calibration/reset","calibration/swap","codes")
 def call(p, body=None, method=None):
     m = method or ("POST" if (body is not None or p in POSTS) else "GET")
     d = json.dumps(body).encode() if body is not None else None
@@ -306,6 +306,76 @@ import re as _re, pathlib as _pl
 _manifest = _pl.Path(__file__).resolve().parent.parent / "doorbot" / "config.yaml"
 _declared = _re.search(r'^version:\s*"?([^"\n]+)"?', _manifest.read_text(), _re.M).group(1).strip()
 ok("code version matches the add-on manifest", call("info")["version"] == _declared)
+
+
+# --- direction of rotation ---
+call("calibration/reset")
+call("calibration/torque", {"enabled": True})
+call("calibration/goto", {"position": 1500}); time.sleep(0.4)
+call("calibration/capture", {"which": "unlocked"})
+call("calibration/goto", {"position": 2400}); time.sleep(0.4)
+s=call("calibration/capture", {"which": "locked"})
+# The mock's simulated hard stops can clamp a capture, so compare against what
+# was actually captured rather than against the position we asked for.
+_lk, _ul = s["calibration"]["locked_position"], s["calibration"]["unlocked_position"]
+ok("direction derived from the captured points", s["direction"]["sign"]==1 and _lk>_ul)
+ok("locking reads as clockwise", s["direction"]["locking"]=="clockwise")
+ok("unlocking is the opposite", s["direction"]["unlocking"]=="counter-clockwise")
+
+# A hold-open point must sit past unlocked, away from locked.
+_wrong, _right = _ul + 100, _ul - 200      # locking is +ve here, so past unlocked is -ve
+r=call("calibration", {"hold_seconds": 5, "hold_position": _wrong})
+ok("hold point on the locked side is rejected", r.get("HTTP")==409)
+ok("rejection names the direction", "locked side" in r.get("error",""))
+ok("rejected save did not persist",
+   call("calibration", method="GET")["hold_position"]!=_wrong)
+s=call("calibration", {"hold_seconds": 5, "hold_position": _right})
+ok("hold point past unlocked is accepted", s["calibration"]["hold_position"]==_right)
+ok("hold point reported valid", s["direction"]["hold_valid"] is True)
+
+# Swapping reverses travel and carries the hold point across with it.
+s=call("calibration/swap")
+ok("swap reverses the direction", s["direction"]["sign"]==-1)
+ok("swap exchanges the end points",
+   s["calibration"]["locked_position"]==_ul and s["calibration"]["unlocked_position"]==_lk)
+ok("swap keeps the hold point the same distance past unlocked",
+   s["calibration"]["hold_position"]-_lk == _ul-_right)
+ok("hold point still valid after swap", s["direction"]["hold_valid"] is True)
+ok("lock still works after swapping", call("lock")["state"]=="locked")
+ok("unlock still works after swapping", call("unlock")["state"]=="unlocked")
+
+# Re-capturing so the direction flips must retire a now-wrong-side hold point.
+call("calibration/goto", {"position": _lk + 300}); time.sleep(0.6)
+s=call("calibration/capture", {"which": "locked"})
+ok("direction flipped back by recapture", s["direction"]["sign"]==1)
+ok("stranded hold point was retired",
+   s["calibration"]["hold_position"]==s["calibration"]["unlocked_position"])
+ok("hold point valid after recapture", s["direction"]["hold_valid"] is True)
+
+# Put the rig back the way the rest of the suite expects it.
+call("calibration", {"hold_seconds": 0})
+call("calibration/reset")
+call("calibration/goto", {"position": 2400}); time.sleep(0.4)
+call("calibration/capture", {"which":"locked"})
+call("calibration/goto", {"position": 1500}); time.sleep(0.4)
+call("calibration/capture", {"which":"unlocked"})
+
+# invert must actually change behaviour rather than just being stored. Jog from
+# the midpoint so the simulated hard stops cannot clamp the move either way.
+_c=call("calibration", method="GET")
+_mid=(_c["locked_position"]+_c["unlocked_position"])//2
+def _jog_delta():
+    call("calibration/goto", {"position": _mid}); time.sleep(0.5)
+    _b=call("status")["servo"]["position"]
+    call("calibration/jog", {"delta": 100}); time.sleep(0.4)
+    return call("status")["servo"]["position"]-_b
+call("calibration", {"invert": False})
+_plain=_jog_delta()
+call("calibration", {"invert": True})
+_inv=_jog_delta()
+ok("invert reverses jog direction", _plain>0 and _inv<0)
+call("calibration", {"invert": False})
+ok("direction survives a reload", call("status")["direction"]["sign"]==1)
 
 
 ok("events logged", len(call("events?limit=100")["events"])>10)

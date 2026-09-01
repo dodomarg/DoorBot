@@ -342,3 +342,19 @@ legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 6px;
   border-color: rgba(217, 131, 36, .45);
   color: var(--warn);
 }
+
+/* ------------------------------------------------------- rotation direction */
+.direction-row { align-items: center; gap: .6rem; }
+.dirbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .3rem .7rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: .9rem;
+  background: rgba(56, 118, 209, .14);
+  color: var(--brand);
+}
+.dirbadge.bad { background: rgba(208, 69, 59, .14); color: var(--bad); }
+.jog-legend { display: flex; justify-content: space-between; margin: .3rem .1rem 0; font-size: .8rem; }

@@ -44,12 +44,25 @@ that are quietly wrong. The component reads the model number at startup and
 refuses to configure a known SCS part rather than driving it with the wrong
 encoding.
 
+## Model numbers
+
+Read from register 3 at startup. The ST3235 value was measured from real
+hardware — it is not in Feetech's documentation or in lerobot's table.
+
+| Servo | Model number | Source |
+|---|---|---|
+| ST3215 / STS3215 | **777** | lerobot `MODEL_NUMBER_TABLE` |
+| ST3235 | **2057** | measured on real hardware, 2026-09-01 |
+| STS3250 | 2825 | lerobot `MODEL_NUMBER_TABLE` |
+| SM8512BL | 11272 | lerobot `MODEL_NUMBER_TABLE` |
+| SCS0009 | 1284 | lerobot — **rejected**, incompatible protocol |
+
 ## Basics
 
 | Property | Value |
 |---|---|
 | Protocol | Feetech **SMS/STS**, protocol version **0** |
-| Model number | register 3, read-only, 2 bytes (ST3215 reports **777**) |
+| Model number | register 3, read-only, 2 bytes (see table below) |
 | Resolution | **4096** steps per revolution |
 | Default baud | **1,000,000** (baud table index 0) |
 | Default ID | 1 |

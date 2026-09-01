@@ -113,6 +113,9 @@ const char *move_result_to_string(MoveResult result);
 // be silently wrong here. Numbers cross-checked against
 // huggingface/lerobot's MODEL_NUMBER_TABLE.
 static const uint16_t STS_MODEL_STS3215 = 777;
+// Read from a real ST3235 on 2026-09-01. lerobot's table does not list this
+// model, so the number comes from the hardware itself rather than a datasheet.
+static const uint16_t STS_MODEL_ST3235 = 2057;
 static const uint16_t STS_MODEL_STS3250 = 2825;
 static const uint16_t STS_MODEL_SM8512BL = 11272;
 static const uint16_t SCS_MODEL_SCS0009 = 1284;

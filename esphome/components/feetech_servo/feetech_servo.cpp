@@ -32,10 +32,11 @@ const char *model_number_to_string(uint16_t model) {
   switch (model) {
     case STS_MODEL_STS3215:
       // Waveshare sells this as ST3215; Feetech's own part number is STS3215.
-      // The ST3235 shares the control table but reports a different number, so
-      // it falls through to the unknown case below until one is confirmed
-      // against real hardware.
       return "ST3215 / STS3215";
+    case STS_MODEL_ST3235:
+      // Steel-geared sibling of the ST3215. Same control table, same 4096-step
+      // encoder, same protocol -- it differs only mechanically.
+      return "ST3235";
     case STS_MODEL_STS3250:
       return "STS3250";
     case STS_MODEL_SM8512BL:

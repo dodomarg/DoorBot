@@ -53,6 +53,44 @@ def travel_limits(multi_turn: bool) -> tuple[int, int]:
     return 0, RESOLUTION - 1
 
 
+def direction_sign(cal: dict[str, Any]) -> int:
+    """+1 when locking increases the step count, -1 when it decreases.
+
+    The two captured end points are the single source of truth for which way
+    the lock turns. Everything directional -- the overshoot push, the hold-open
+    point, the jog arrows -- is derived from this rather than configured
+    separately, so the two can never disagree.
+    """
+    return 1 if int(cal.get("locked_position", 0)) >= int(cal.get("unlocked_position", 0)) else -1
+
+
+def direction_label(cal: dict[str, Any]) -> str:
+    """How the locking turn reads to a person watching the output shaft.
+
+    A Feetech servo counts up clockwise as seen from the horn, but a mirrored
+    mount or an extra gear reverses what the user actually sees, which is what
+    the `invert` flag records.
+    """
+    clockwise = direction_sign(cal) > 0
+    if cal.get("invert"):
+        clockwise = not clockwise
+    return "clockwise" if clockwise else "counter-clockwise"
+
+
+def hold_position_is_valid(cal: dict[str, Any]) -> bool:
+    """True when the hold-open point lies beyond unlocked, away from locked.
+
+    Holding the latch means turning further in the unlocking direction. A value
+    on the locked side would drive the bolt back out while reporting that the
+    door is being held open for you.
+    """
+    if int(cal.get("hold_seconds") or 0) <= 0:
+        return True
+    unlocked = int(cal.get("unlocked_position", 0))
+    hold = int(cal.get("hold_position", unlocked))
+    return (hold - unlocked) * direction_sign(cal) <= 0
+
+
 class BackendError(RuntimeError):
     pass
 
@@ -465,6 +503,16 @@ class LockController:
                 "calibrated": bool(cal.get("calibrated")),
                 "servo": servo,
                 "calibration": cal,
+                "direction": {
+                    "sign": direction_sign(cal),
+                    "locking": direction_label(cal),
+                    "unlocking": (
+                        "counter-clockwise"
+                        if direction_label(cal) == "clockwise"
+                        else "clockwise"
+                    ),
+                    "hold_valid": hold_position_is_valid(cal),
+                },
                 "auto_lock_pending": self._auto_lock_timer is not None,
             }
 
@@ -676,6 +724,12 @@ class LockController:
     def jog(self, delta: int) -> dict[str, Any]:
         with self._lock:
             servo = self._require_online("ui")
+            cal = self.db.get_calibration()
+            # The arrows are labelled by what the user sees at the thumbturn, so
+            # a mirrored mount has to flip the raw step delta to match. Without
+            # this, "invert" was a checkbox that changed nothing at all.
+            if cal.get("invert"):
+                delta = -delta
             if not servo["torque"] and isinstance(self.backend, MockBackend):
                 self.backend.nudge_by_hand(delta)
             else:
@@ -709,6 +763,18 @@ class LockController:
             cal = self.db.save_calibration({f"{which}_position": position})
             travel = abs(cal["locked_position"] - cal["unlocked_position"])
             cal = self.db.save_calibration({"calibrated": travel >= MIN_TRAVEL})
+            # Re-capturing an end point can reverse which way the lock turns,
+            # which can strand a previously valid hold-open point on the locked
+            # side. Retire it rather than leave it pointing the wrong way.
+            if not hold_position_is_valid(cal):
+                cal = self.db.save_calibration(
+                    {"hold_position": int(cal["unlocked_position"])}
+                )
+                self.db.log(
+                    "calibration",
+                    "Reset the hold-open position: the direction of rotation changed",
+                    actor="ui",
+                )
             self._sync_hard_stops()
             self.db.log(
                 "calibration",
@@ -727,6 +793,7 @@ class LockController:
 
     def save_calibration(self, values: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
+            before = self.db.get_calibration()
             allowed = {
                 k: v
                 for k, v in values.items()
@@ -771,6 +838,22 @@ class LockController:
                 if key in allowed:
                     allowed[key] = bool(allowed[key])
             cal = self.db.save_calibration(allowed)
+            # A hold-open point on the wrong side of the unlocked position would
+            # drive the bolt back out while reporting the door as held open, so
+            # it is rejected rather than clamped.
+            if not hold_position_is_valid(cal):
+                self.db.save_calibration(before)
+                unlocking = (
+                    "counter-clockwise"
+                    if direction_label(cal) == "clockwise"
+                    else "clockwise"
+                )
+                raise BackendError(
+                    f"The hold-open position ({cal.get('hold_position')}) is on the "
+                    f"locked side of the unlocked position "
+                    f"({cal.get('unlocked_position')}). Holding the latch means "
+                    f"turning further {unlocking}, the same way unlocking turns."
+                )
             # Editing the end points by hand must re-check that they are usable.
             if "locked_position" in allowed or "unlocked_position" in allowed:
                 travel = abs(cal["locked_position"] - cal["unlocked_position"])
@@ -785,6 +868,40 @@ class LockController:
             self.db.save_calibration({"calibrated": False})
             self._sync_hard_stops()
             self.db.log("calibration", "Calibration reset", actor="ui")
+            return self.status()
+
+    def swap_direction(self) -> dict[str, Any]:
+        """Reverse which way the lock turns by swapping the two end points.
+
+        The usual reason to need this is capturing the end points in the wrong
+        order: the travel is right but every move goes the wrong way. Swapping
+        is preferable to re-running the wizard, and mirroring the hold-open
+        point about the new unlocked position keeps it the same distance past
+        the end rather than silently discarding it.
+        """
+        with self._lock:
+            cal = self.db.get_calibration()
+            locked, unlocked = int(cal["locked_position"]), int(cal["unlocked_position"])
+            values: dict[str, Any] = {
+                "locked_position": unlocked,
+                "unlocked_position": locked,
+            }
+            if int(cal.get("hold_seconds") or 0) > 0:
+                past_end = int(cal.get("hold_position", unlocked)) - unlocked
+                low, high = travel_limits(bool(cal.get("multi_turn")))
+                values["hold_position"] = max(low, min(high, locked - past_end))
+            cal = self.db.save_calibration(values)
+            if not hold_position_is_valid(cal):
+                cal = self.db.save_calibration(
+                    {"hold_position": int(cal["unlocked_position"])}
+                )
+            self._sync_hard_stops()
+            self.db.log(
+                "calibration",
+                f"Swapped the direction of rotation - locking now turns "
+                f"{direction_label(cal)}",
+                actor="ui",
+            )
             return self.status()
 
 
